@@ -38,7 +38,7 @@ _console = Console(legacy_windows=False)
 def print_banner(subtitle: str = "") -> None:
     """Prints a big ASCII-art "AuraAgent" splash banner at startup.
     Purely cosmetic — main.py calls this once before the REPL loop starts."""
-    banner = pyfiglet.figlet_format("AuraAgent", font="colossal")
+    banner = pyfiglet.figlet_format("AuraAgent", font="ansi_shadow")
     _console.print(banner, style="bold cyan", highlight=False)
     if subtitle:
         _console.print(subtitle, style="dim", highlight=False)
