@@ -9,6 +9,7 @@ instead of printing — the two sinks are independent by design.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,21 @@ from typing import Any
 from rich.console import Console
 from rich.panel import Panel
 
-_console = Console()
+# LLM output routinely contains emoji / non-BMP characters. On Windows,
+# `sys.stdout` may default to the system codepage (e.g. GBK), and rich's
+# "legacy Windows terminal" render path writes through the Win32 console
+# API using that codepage directly rather than respecting stdout's own
+# encoding — so a stray emoji can crash the whole REPL. Reconfiguring
+# stdout/stderr to UTF-8 and forcing rich off the legacy code path (ANSI
+# escapes instead) avoids both failure modes; `legacy_windows=False` is
+# safe on any terminal that understands ANSI, which includes Windows 10+.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+_console = Console(legacy_windows=False)
 
 
 class AuraLogger:

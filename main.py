@@ -18,6 +18,8 @@ from confirmation.terminal_channel import TerminalConfirmationChannel
 from core.logger import AuraLogger
 from core.react_engine import AsyncReActEngine
 from providers.anthropic_provider import AnthropicProvider
+from providers.base import LLMProvider
+from providers.openai_provider import OpenAIProvider
 from tools.calendar.calendar_tool import register_calendar_tools
 from tools.calendar.local_json_calendar import LocalJSONCalendarProvider
 from tools.notes.notes_tool import register_notes_tools
@@ -46,7 +48,13 @@ async def main() -> None:
     # MCP / Skill registration land in a later iteration — see
     # mcp_integration/ and skills/ for their scaffolded seams.
 
-    provider = AnthropicProvider(api_key=settings.anthropic_api_key, model=settings.model_id)
+    provider: LLMProvider
+    if settings.llm_provider == "openai":
+        provider = OpenAIProvider(
+            api_key=settings.openai_api_key, model=settings.model_id, base_url=settings.openai_base_url
+        )
+    else:
+        provider = AnthropicProvider(api_key=settings.anthropic_api_key, model=settings.model_id)
     logger = AuraLogger(settings.logs_dir)
     engine = AsyncReActEngine(
         provider=provider,

@@ -16,7 +16,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    # "anthropic" -> providers.anthropic_provider.AnthropicProvider
+    # "openai"    -> providers.openai_provider.OpenAIProvider (also serves
+    #                any OpenAI-compatible endpoint, e.g. DeepSeek, via
+    #                openai_base_url)
+    llm_provider: str = Field(default="anthropic", alias="AURA_LLM_PROVIDER")
+
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
+
     model_id: str = Field(default="claude-opus-5", alias="AURA_MODEL_ID")
     max_turns: int = Field(default=15, alias="AURA_MAX_TURNS")
     log_level: str = Field(default="INFO", alias="AURA_LOG_LEVEL")
@@ -33,8 +42,19 @@ class Settings(BaseSettings):
 
 def load_settings() -> Settings:
     settings = Settings()
-    if not settings.anthropic_api_key:
+    if settings.llm_provider == "anthropic":
+        if not settings.anthropic_api_key:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill in your key."
+            )
+    elif settings.llm_provider == "openai":
+        if not settings.openai_api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY is not set. Copy .env.example to .env and fill in your key "
+                "(for DeepSeek: your DeepSeek API key, plus OPENAI_BASE_URL=https://api.deepseek.com)."
+            )
+    else:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill in your key."
+            f"Unknown AURA_LLM_PROVIDER '{settings.llm_provider}' — expected 'anthropic' or 'openai'."
         )
     return settings
