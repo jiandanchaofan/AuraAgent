@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pyfiglet
 from rich.console import Console
 from rich.panel import Panel
 
@@ -32,6 +33,16 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 _console = Console(legacy_windows=False)
+
+
+def print_banner(subtitle: str = "") -> None:
+    """Prints a big ASCII-art "AuraAgent" splash banner at startup.
+    Purely cosmetic — main.py calls this once before the REPL loop starts."""
+    banner = pyfiglet.figlet_format("AuraAgent", font="slant")
+    _console.print(banner, style="bold cyan", highlight=False)
+    if subtitle:
+        _console.print(subtitle, style="dim", highlight=False)
+    _console.print()
 
 
 class AuraLogger:

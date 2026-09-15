@@ -5,6 +5,7 @@ pydantic-settings>=2.3
 python-dotenv>=1.0
 PyYAML>=6.0
 rich>=13.7
+pyfiglet>=1.0
 mcp>=1.2
 
 # --- dev / test only ---

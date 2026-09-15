@@ -15,7 +15,7 @@ import asyncio
 
 from config.settings import load_settings
 from confirmation.terminal_channel import TerminalConfirmationChannel
-from core.logger import AuraLogger
+from core.logger import AuraLogger, print_banner
 from core.react_engine import AsyncReActEngine
 from providers.anthropic_provider import AnthropicProvider
 from providers.base import LLMProvider
@@ -64,7 +64,7 @@ async def main() -> None:
         max_turns=settings.max_turns,
     )
 
-    print("AuraAgent v1 — core ReAct loop + Markdown notes + local calendar. Type 'exit' to quit.\n")
+    print_banner(f"v1 — asyncio ReAct + Markdown notes + local calendar  |  provider={settings.llm_provider} model={settings.model_id}  |  type 'exit' to quit")
     while True:
         try:
             user_input = input("You> ").strip()
