@@ -1,0 +1,11 @@
+anthropic>=0.69
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+PyYAML>=6.0
+rich>=13.7
+mcp>=1.2
+
+# --- dev / test only ---
+pytest>=8.0
+pytest-asyncio>=0.23

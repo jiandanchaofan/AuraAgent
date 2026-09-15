@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+sandbox/notes/*
+!sandbox/notes/.gitkeep
+sandbox/calendar/*
+!sandbox/calendar/.gitkeep
+
+logs/*
+!logs/.gitkeep
+
+.pytest_cache/
+*.egg-info/
