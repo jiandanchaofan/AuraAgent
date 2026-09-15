@@ -7,7 +7,8 @@
 - **核心异步 ReAct 循环**（`core/react_engine.py`）：Reason → Act → Observe，每一轮的 Thought / Tool Call / Observation 都打印到终端并写入 `logs/session-*.jsonl`。
 - **可插拔的 LLM 抽象层**（`providers/`）：`LLMProvider` 接口 + `AnthropicProvider` 实现；`OpenAIProvider` 留有接口占位，后续可直接实现。
 - **本地 Markdown 笔记工具**（`tools/notes/`）：`search_notes` / `read_note` / `create_note` / `update_note`，所有文件操作严格限制在 `sandbox/notes/` 内，防止路径穿越。
-- **架构占位（下一轮实现）**：本地 JSON 日历 + Human-in-the-loop 确认（`tools/calendar/`, `confirmation/`）、MCP 客户端（`mcp_integration/`）、Skill 热加载（`skills/`, `skills_store/`）。这些模块的接口/目录已经搭好，方法体标注 `NotImplementedError` 或 `TODO`。
+- **本地 JSON 日历 + Human-in-the-loop 确认**（`tools/calendar/`, `confirmation/`）：`list_calendar_events` / `create_calendar_event` / `update_calendar_event` / `delete_calendar_event`，事件持久化在 `sandbox/calendar/events.json`。删除操作、以及对标记为 `important` 事件的修改，都会通过终端 Y/N 交互确认后才执行；用户拒绝时返回普通 Observation 而不是抛异常。
+- **架构占位（下一轮实现）**：MCP 客户端（`mcp_integration/`）、Skill 热加载（`skills/`, `skills_store/`）。这些模块的接口/目录已经搭好，方法体标注 `NotImplementedError` 或 `TODO`。
 
 ## 运行方式
 
@@ -54,7 +55,6 @@ AuraAgent/
 
 ## 下一轮迭代计划
 
-1. 本地 JSON 日历 CRUD + `CalendarTool` 的 HITL 确认逻辑
-2. MCP `stdio` 服务器真实连接 + 工具动态注册
-3. Skill 加载器：解析 `SKILL.md` 并注册为可调用工具
-4. （更远期）`OpenAIProvider` 真实实现、`GoogleCalendarProvider` OAuth 接入、FastAPI 封装
+1. MCP `stdio` 服务器真实连接 + 工具动态注册
+2. Skill 加载器：解析 `SKILL.md` 并注册为可调用工具
+3. （更远期）`OpenAIProvider` 真实实现、`GoogleCalendarProvider` OAuth 接入、FastAPI 封装
