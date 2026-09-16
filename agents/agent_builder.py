@@ -18,6 +18,7 @@ ScopedToolRegistryView.add_extra_tool() and agent_config_writer.add_agent_entry(
 from __future__ import annotations
 
 from agents.agent_definition import AgentDefinition
+from agents.agent_registry import AgentRegistry, AgentRegistryError
 from agents.delegate_tool import build_delegate_tool
 from agents.scoped_tool_registry import ScopedToolRegistryView
 from core.logger import AuraLogger
@@ -25,6 +26,24 @@ from core.react_engine import AsyncReActEngine
 from providers.base import LLMProvider
 from tools.base import RegisteredTool
 from tools.registry import ToolRegistry
+
+
+def ensure_worker_name_available(name: str, agent_registry: AgentRegistry, registry: ToolRegistry) -> None:
+    """Raise ValueError if `name` can't be used for a new worker — shared by
+    propose_new_agent (tools/self_extend/propose_agent_tool.py, an LLM
+    proposal a human must approve) and the /agents add CLI command (a
+    human typing directly), so both reject the same collisions the same
+    way instead of maintaining two copies of this check."""
+    try:
+        agent_registry.get(name)
+        raise ValueError(f"An agent named '{name}' already exists.")
+    except AgentRegistryError:
+        pass  # good: name is free
+
+    delegate_tool_name = f"delegate_to_{name}"
+    existing_tool_names = {spec.name for spec in registry.get_tool_specs()}
+    if delegate_tool_name in existing_tool_names:
+        raise ValueError(f"Tool name '{delegate_tool_name}' is already registered — choose a different agent name.")
 
 
 def build_worker(

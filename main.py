@@ -18,7 +18,9 @@ from agents.agent_registry import AgentRegistry
 from agents.delegate_tool import build_delegate_tool
 from agents.leader_worker_orchestrator import LeaderWorkerOrchestrator
 from agents.scoped_tool_registry import ScopedToolRegistryView
-from config.settings import load_settings
+from cli.commands import dispatch_command, is_command
+from cli.context import CLIContext
+from config.settings import PROJECT_ROOT, load_settings
 from confirmation.terminal_channel import TerminalConfirmationChannel
 from core.logger import AuraLogger, print_banner
 from core.react_engine import AsyncReActEngine
@@ -26,6 +28,7 @@ from mcp_integration.mcp_client_manager import MCPClientManager
 from providers.anthropic_provider import AnthropicProvider
 from providers.base import LLMProvider
 from providers.openai_provider import OpenAIProvider
+from providers.swappable_provider import SwappableProvider
 from skills.skill_loader import SkillLoader
 from tools.base import RegisteredTool
 from tools.calc.calculate_tool import register_calculate_tools
@@ -73,13 +76,19 @@ async def main() -> None:
     skill_loader = SkillLoader(settings.skills_dir, registry, settings.skill_timeout_seconds)
     skill_loader.scan_and_register()
 
-    provider: LLMProvider
+    concrete_provider: LLMProvider
     if settings.llm_provider == "openai":
-        provider = OpenAIProvider(
+        concrete_provider = OpenAIProvider(
             api_key=settings.openai_api_key, model=settings.model_id, base_url=settings.openai_base_url
         )
     else:
-        provider = AnthropicProvider(api_key=settings.anthropic_api_key, model=settings.model_id)
+        concrete_provider = AnthropicProvider(api_key=settings.anthropic_api_key, model=settings.model_id)
+    # Wrapped in a SwappableProvider so every engine built below (Leader's,
+    # every Worker's, and any built later by propose_new_agent or /agents
+    # add) shares ONE mutable indirection point — this is what lets the
+    # /config use CLI command (cli/commands.py) switch providers at runtime
+    # without reaching into each engine individually.
+    provider = SwappableProvider(concrete_provider, settings.llm_provider)
     logger = AuraLogger(settings.logs_dir)
 
     # Multi-Agent composition: one shared ToolRegistry (built above) feeds a
@@ -148,6 +157,29 @@ async def main() -> None:
     )
     orchestrator = LeaderWorkerOrchestrator(leader_engine)
 
+    # cli/commands.py's human-direct "/" commands (/config, /agents,
+    # /skills, ...) are a second channel onto the same capabilities the
+    # tools/self_extend/ LLM-proposal tools offer — see that module's
+    # docstring. known_api_keys seeds from whatever Settings already loaded
+    # from .env, so /config use works immediately for a key that was
+    # already configured before this process started.
+    known_api_keys = {"anthropic": settings.anthropic_api_key, "openai": settings.openai_api_key}
+    cli_context = CLIContext(
+        settings=settings,
+        registry=registry,
+        agent_registry=agent_registry,
+        leader_view=leader_view,
+        provider=provider,
+        logger=logger,
+        max_turns=settings.max_turns,
+        skill_loader=skill_loader,
+        mcp_manager=mcp_manager,
+        http_client=http_client,
+        agents_config_lock=agents_config_lock,
+        known_api_keys=known_api_keys,
+        env_file_path=PROJECT_ROOT / ".env",
+    )
+
     print_banner(f"AuraAgent, developed by James Jiang | provider={settings.llm_provider} model={settings.model_id} | type 'exit' to quit")
     try:
         while True:
@@ -160,6 +192,12 @@ async def main() -> None:
                 continue
             if user_input.lower() in {"exit", "quit"}:
                 break
+            if is_command(user_input):
+                try:
+                    await dispatch_command(user_input, cli_context)
+                except Exception as exc:  # noqa: BLE001 - keep the REPL alive on unexpected errors
+                    print(f"[ERROR] {type(exc).__name__}: {exc}")
+                continue
             try:
                 await orchestrator.run(user_input)
             except Exception as exc:  # noqa: BLE001 - keep the REPL alive on unexpected errors

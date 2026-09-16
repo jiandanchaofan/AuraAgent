@@ -53,6 +53,13 @@ class SkillLoader:
         self._skills_dir = skills_dir
         self._registry = registry
         self._timeout_seconds = timeout_seconds
+        # Tracks every skill name registered so far (scan_and_register() at
+        # startup, plus any later register_one() call from propose_new_skill
+        # or the /skills load|install CLI commands) — the shared
+        # ToolRegistry itself doesn't tag which of its tools came from a
+        # Skill vs. a native tool vs. MCP, so this is the only place that
+        # can answer "what Skills are installed" for the /skills command.
+        self.registered_skill_names: list[str] = []
 
     def scan_and_register(self) -> list[str]:
         if not self._skills_dir.exists():
@@ -80,6 +87,7 @@ class SkillLoader:
         # resolve it relative to that same cwd a second time, doubling it.
         manifest = parse_skill_manifest(skill_dir.resolve())
         self._register_skill(manifest)
+        self.registered_skill_names.append(manifest.name)
         print(f"[Skills] Registered skill '{manifest.name}' from '{skill_dir.name}'.")
         return manifest.name
 

@@ -26,10 +26,10 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from agents.agent_builder import build_worker
+from agents.agent_builder import build_worker, ensure_worker_name_available
 from agents.agent_config_writer import add_agent_entry
 from agents.agent_definition import AgentDefinition, AgentDefinitionError
-from agents.agent_registry import AgentRegistry, AgentRegistryError
+from agents.agent_registry import AgentRegistry
 from agents.scoped_tool_registry import ScopedToolRegistryView
 from confirmation.base import ConfirmationChannel, ConfirmationRequest
 from core.exceptions import ToolExecutionError
@@ -65,17 +65,9 @@ def register_propose_agent_tool(
             raise ToolExecutionError(str(exc)) from exc
 
         try:
-            agent_registry.get(name)
-            raise ToolExecutionError(f"An agent named '{name}' already exists.")
-        except AgentRegistryError:
-            pass  # good: name is free
-
-        delegate_tool_name = f"delegate_to_{name}"
-        existing_tool_names = {spec.name for spec in registry.get_tool_specs()}
-        if delegate_tool_name in existing_tool_names:
-            raise ToolExecutionError(
-                f"Tool name '{delegate_tool_name}' is already registered — choose a different agent name."
-            )
+            ensure_worker_name_available(name, agent_registry, registry)
+        except ValueError as exc:
+            raise ToolExecutionError(str(exc)) from exc
 
         proposal = _build_proposal_text(new_agent, reason, registry)
 

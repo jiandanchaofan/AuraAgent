@@ -76,6 +76,13 @@ class ScopedToolRegistryView:
         immediately, same as add_allowed_pattern()."""
         self._extra_tools[tool.spec.name] = tool
 
+    def remove_extra_tool(self, tool_name: str) -> None:
+        """Remove a synthetic, view-local tool at runtime — the /agents
+        remove CLI command's counterpart to add_extra_tool(). A no-op if
+        `tool_name` isn't present, mirroring agent_config_writer.remove_agent_entry()'s
+        idempotent "already gone" behavior."""
+        self._extra_tools.pop(tool_name, None)
+
     def get_tool_specs(self) -> list[ToolSpec]:
         visible = [spec for spec in self._underlying.get_tool_specs() if self._is_allowed(spec.name)]
         visible.extend(entry.spec for entry in self._extra_tools.values())
