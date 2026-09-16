@@ -38,6 +38,8 @@ from tools.human.ask_human_tool import register_ask_human_tools
 from tools.memory.memory_store import MemoryStore
 from tools.memory.memory_tool import register_memory_tools
 from tools.notes.notes_tool import register_notes_tools
+from tools.profile.user_profile_store import UserProfileStore
+from tools.profile.user_profile_tool import register_user_profile_tools
 from tools.registry import ToolRegistry
 from tools.self_extend.propose_agent_tool import register_propose_agent_tool
 from tools.self_extend.propose_mcp_tool import register_propose_mcp_tool
@@ -63,6 +65,9 @@ async def main() -> None:
     memory_store = MemoryStore(settings.memory_file)
     register_memory_tools(registry, memory_store)
     register_ask_human_tools(registry, confirmation_channel)
+
+    user_profile_store = UserProfileStore(settings.user_profile_file)
+    register_user_profile_tools(registry, user_profile_store)
 
     register_calculate_tools(registry)
     http_client = build_default_http_client()
@@ -147,11 +152,20 @@ async def main() -> None:
         grant_access=grant_access,
     )
 
+    # The user profile (tools/profile/) is read ONCE here and spliced
+    # directly into the Leader's system prompt — unlike remember_fact/
+    # recall_facts (pull-based, the LLM must actively query), the profile
+    # is meant to be always visible with no tool call needed. See
+    # tools/profile/user_profile_store.py's docstring for why a
+    # mid-session update only takes effect starting the next restart.
+    profile_text = (await user_profile_store.get_profile()).render()
+    leader_system_prompt = f"{leader.system_prompt}\n\n{profile_text}" if profile_text else leader.system_prompt
+
     leader_engine = AsyncReActEngine(
         provider=provider,
         registry=leader_view,
         logger=logger,
-        system_prompt=leader.system_prompt,
+        system_prompt=leader_system_prompt,
         max_turns=settings.max_turns,
         agent_name=leader.name,
     )
