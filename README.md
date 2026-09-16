@@ -13,7 +13,7 @@
 - **跨会话记忆工具**（`tools/memory/`）：`remember_fact` / `recall_facts`，持久化在 `sandbox/memory/facts.json`。拉取式设计——记忆内容不自动注入 system prompt，模型需要主动调用才能读到，避免随记忆条数增长而增加每轮 token 成本。
 - **`ask_human` 工具**（`tools/human/`）：让模型能暂停当前任务、向人类提出开放式问题并等待自由文本回答。复用日历/任务工具已有的 `confirmation_channel` 实例——`ConfirmationChannel` 接口在原来的 `confirm()`（Y/N）基础上加了 `ask_open_question()`（自由文本），同一个物理通道，两种响应形态。
 - **MCP 客户端**（`mcp_integration/`）：`MCPClientManager` 用官方 `mcp` SDK 通过 stdio 连接 `config/mcp_servers.json` 里配置的 server，把每个 server 上报的工具适配成 `ToolSpec` 注册进同一个共享 `ToolRegistry`（工具名加 `mcp_<server>_` 前缀防冲突）。某个 server 连接失败只会打印警告、跳过，不影响其他 server 或整个程序启动。附带一个零外部依赖的示例 server（`mcp_servers/example_server.py`，两个玩具工具），开箱即用地演示整条链路，不需要 `npx`/联网拉包。
-- **架构占位（下一轮实现）**：Skill 热加载（`skills/`, `skills_store/`）。接口/目录已经搭好，方法体标注 `NotImplementedError` 或 `TODO`。
+- **Skill 热加载**（`skills/`, `skills_store/`）：`SkillLoader` 扫描 `skills_store/*/SKILL.md`（YAML front matter：`name`/`description`/`input_schema`），为每个 skill 起一个子进程（`sys.executable run.py --args-json '...'`，所有参数统一走一个 JSON blob，不用逐个映射成 CLI flag），捕获 stdout 当 Observation，同样注册进共享 `ToolRegistry`。有超时保护（默认 30s，超时会杀掉子进程），单个 skill 解析/加载失败只跳过它，不影响其他 skill 或程序启动。`skills_store/example_skill/`（`word_count`）是一个真实可跑的示例。
 
 ## 运行方式
 
@@ -59,7 +59,7 @@ AuraAgent/
 ├── confirmation/            # Human-in-the-loop 确认通道抽象
 ├── mcp_integration/         # MCP 客户端（真实实现：stdio 连接 + 工具适配）
 ├── mcp_servers/             # 零外部依赖的示例 MCP server，用于本地验证
-├── skills/ skills_store/    # Skill 热加载机制（占位）+ 示例 skill
+├── skills/ skills_store/    # Skill 热加载（真实实现）+ 示例 skill
 ├── sandbox/                # 所有工具副作用限定于此
 ├── logs/                   # 白盒执行日志 (JSONL)
 └── tests/                  # pytest 单测
@@ -73,7 +73,7 @@ AuraAgent/
 |---|---|---|
 | A | 记忆工具 + `ask_human` | ✅ 已完成 |
 | B | MCP `stdio` 客户端真实连接 + 工具动态注册 | ✅ 已完成 |
-| C | Skill 热加载真实实现（解析 `SKILL.md`） | 未开始 |
+| C | Skill 热加载真实实现（解析 `SKILL.md`） | ✅ 已完成 |
 | D | Multi-Agent 基础设施 + Leader-Worker 编排（进程内，`worker-as-tool` 模式，并发工具派发） | 未开始 |
 | E | 其他编排模式、FastAPI 封装、Google Calendar OAuth、A2A 协议对外互通 | 更远期，仅占位 |
 

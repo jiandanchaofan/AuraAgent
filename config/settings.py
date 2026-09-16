@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     fetch_url_timeout_seconds: float = Field(default=10.0, alias="AURA_FETCH_URL_TIMEOUT_SECONDS")
     fetch_url_max_bytes: int = Field(default=200_000, alias="AURA_FETCH_URL_MAX_BYTES")
+    skill_timeout_seconds: float = Field(default=30.0, alias="AURA_SKILL_TIMEOUT_SECONDS")
 
     # Fixed sandbox locations — not env-configurable in v1 so every tool's
     # blast radius is predictable regardless of how the process is launched.

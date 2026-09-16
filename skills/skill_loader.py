@@ -3,28 +3,89 @@ manifest and registers each as a callable tool, giving Skills the same
 hot-pluggable parity as native and MCP-provided tools (all three converge
 on the same ToolRegistry.register()).
 
-v1 status: skills_store/example_skill/ ships as a real, working example
-(SKILL.md + run.py) so this loader has something concrete to discover once
-implemented — it isn't a placeholder skill.
+Invocation convention every skill's run.py must follow: all tool
+arguments are passed as a single JSON blob via one `--args-json` flag
+(rather than mapping each argument to its own CLI flag) — this keeps the
+subprocess-invocation code below identical regardless of what arguments a
+particular skill's input_schema declares. The skill's own directory is
+used as the subprocess's working directory, so a skill can reference its
+own local files with relative paths. The child is launched with
+sys.executable (not a bare "python") so it always shares the parent's
+Python environment — same fix as mcp_integration/mcp_client_manager.py's.
 
-TODO (next iteration): parse SKILL.md's YAML front matter into a
-SkillManifest, build a ToolSpec + a subprocess-based handler
-(`python run.py --args-json '...'`, capturing stdout as the Observation)
-from it, and call registry.register().
+A skill that fails to parse or load is logged and skipped rather than
+aborting startup — same "optional, best-effort" posture as MCP servers.
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import sys
 from pathlib import Path
+from typing import Any
 
+from core.exceptions import ToolExecutionError
+from skills.skill_schema import SkillManifest, SkillManifestError, parse_skill_manifest
+from tools.base import ToolSpec
 from tools.registry import ToolRegistry
+
+DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
 class SkillLoader:
-    def __init__(self, skills_dir: Path, registry: ToolRegistry) -> None:
+    def __init__(
+        self, skills_dir: Path, registry: ToolRegistry, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    ) -> None:
         self._skills_dir = skills_dir
         self._registry = registry
+        self._timeout_seconds = timeout_seconds
 
     def scan_and_register(self) -> list[str]:
         if not self._skills_dir.exists():
             return []
-        raise NotImplementedError("Skill loading lands in a future iteration — see module docstring.")
+
+        registered: list[str] = []
+        # Resolve to absolute paths up front: manifest.entrypoint is later
+        # passed as a subprocess arg alongside `cwd=entrypoint.parent` — if
+        # entrypoint were still relative, the child process would resolve
+        # it relative to that same cwd a second time, doubling the path.
+        for skill_dir in sorted(p for p in self._skills_dir.resolve().iterdir() if p.is_dir()):
+            try:
+                manifest = parse_skill_manifest(skill_dir)
+            except SkillManifestError as exc:
+                print(f"[Skills] Failed to load skill from '{skill_dir.name}': {exc}")
+                continue
+            self._register_skill(manifest)
+            registered.append(manifest.name)
+            print(f"[Skills] Registered skill '{manifest.name}' from '{skill_dir.name}'.")
+        return registered
+
+    def _register_skill(self, manifest: SkillManifest) -> None:
+        async def handler(args: dict[str, Any]) -> str:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(manifest.entrypoint),
+                "--args-json",
+                json.dumps(args),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(manifest.entrypoint.parent),
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._timeout_seconds)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                raise ToolExecutionError(f"Skill '{manifest.name}' timed out after {self._timeout_seconds}s.")
+
+            if process.returncode != 0:
+                raise ToolExecutionError(
+                    f"Skill '{manifest.name}' exited with code {process.returncode}: "
+                    f"{stderr.decode('utf-8', errors='replace').strip()}"
+                )
+            return stdout.decode("utf-8", errors="replace").strip()
+
+        self._registry.register(
+            ToolSpec(name=manifest.name, description=manifest.description, input_schema=manifest.input_schema),
+            handler,
+        )

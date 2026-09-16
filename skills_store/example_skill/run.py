@@ -1,12 +1,15 @@
-"""Example skill entrypoint: prints the word count of the text passed via --text.
+"""Example skill entrypoint: counts words in the "text" argument.
 
-Not yet wired up by SkillLoader (see skills/skill_loader.py) — this file
-exists so the loader has a real target to discover once implemented.
+Follows the invocation convention every skill's run.py must follow — all
+arguments arrive as a single JSON blob via --args-json, not individual CLI
+flags (see skills/skill_loader.py for why).
 """
 import argparse
+import json
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--text", required=True)
+    parser.add_argument("--args-json", required=True)
     args = parser.parse_args()
-    print(len(args.text.split()))
+    payload = json.loads(args.args_json)
+    print(len(payload["text"].split()))

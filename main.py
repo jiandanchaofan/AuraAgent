@@ -19,6 +19,7 @@ from core.logger import AuraLogger, print_banner
 from core.react_engine import AsyncReActEngine
 from mcp_integration.mcp_client_manager import MCPClientManager
 from providers.anthropic_provider import AnthropicProvider
+from skills.skill_loader import SkillLoader
 from providers.base import LLMProvider
 from providers.openai_provider import OpenAIProvider
 from tools.calc.calculate_tool import register_calculate_tools
@@ -83,8 +84,8 @@ async def main() -> None:
 
     mcp_manager = MCPClientManager(settings.mcp_config_path, registry)
     await mcp_manager.connect_all()
-    # Skill registration lands in a later iteration — see skills/ for its
-    # scaffolded seam.
+
+    SkillLoader(settings.skills_dir, registry, settings.skill_timeout_seconds).scan_and_register()
 
     provider: LLMProvider
     if settings.llm_provider == "openai":
