@@ -53,6 +53,58 @@ def test_all_shipped_market_insight_skills_parse_and_register():
         assert "segment" in specs_by_name[name].input_schema["properties"]
 
 
+@pytest.mark.asyncio
+async def test_make_pptx_skill_generates_a_real_pptx_file(tmp_path):
+    """Unlike the market-insight skills, make_pptx has no network
+    dependency (pure local file generation via python-pptx), so this runs
+    for real rather than being structural-only."""
+    registry = ToolRegistry()
+    loader = SkillLoader(REAL_SKILLS_STORE, registry)
+    loader.scan_and_register()
+
+    output_path = tmp_path / "demo.pptx"
+    result = await registry.dispatch(
+        "make_pptx",
+        {
+            "output_path": str(output_path),
+            "title": "Test Deck",
+            "slides": [{"title": "Slide One", "bullets": ["Point A", "Point B"]}],
+        },
+    )
+
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 1000  # a real .pptx zip archive, not an empty/error stub
+    assert "demo.pptx" in result
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_skill_output_is_not_corrupted(tmp_path):
+    """Regression test: on Windows, a child process's stdout piped (not a
+    real console) does not default to UTF-8 — it falls back to the system
+    codepage (e.g. GBK), silently corrupting any non-ASCII output into
+    replacement characters unless PYTHONIOENCODING is forced. This is
+    real corruption of the Observation text/JSONL log, not just a
+    terminal rendering artifact — reproduced with make_pptx's Chinese
+    status message before being fixed."""
+    _write_skill(
+        tmp_path,
+        "chinese_output",
+        skill_md="---\nname: chinese_output\ndescription: prints Chinese text\n---\nbody\n",
+        run_py="import argparse\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--args-json', required=True)\n"
+        "p.parse_args()\n"
+        "print('已生成测试文件（共 3 页）')\n",
+    )
+    registry = ToolRegistry()
+    loader = SkillLoader(tmp_path, registry)
+    loader.scan_and_register()
+
+    result = await registry.dispatch("chinese_output", {})
+
+    assert result == "已生成测试文件（共 3 页）"
+    assert "�" not in result  # no replacement characters from a codepage mismatch
+
+
 def test_broken_skill_is_skipped_without_blocking_others(tmp_path):
     _write_skill(
         tmp_path,

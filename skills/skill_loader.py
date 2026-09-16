@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,19 @@ from tools.base import ToolSpec
 from tools.registry import ToolRegistry
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
+
+# Real, reproducible bug this works around: on Windows, a child Python
+# process whose stdout is a pipe (not a real console — exactly our case,
+# since we capture it with asyncio.subprocess.PIPE) does not default its
+# stdout encoding to UTF-8. It falls back to the system ANSI codepage
+# (e.g. GBK on a Chinese-locale Windows install), so any non-ASCII output
+# a skill prints gets encoded as GBK bytes; our `.decode("utf-8", ...)`
+# below then can't decode them and every character becomes U+FFFD. This
+# silently corrupted Chinese output before this fix — not just a terminal
+# rendering issue, the corrupted text was what actually got returned as
+# the Observation and written to logs/session-*.jsonl. Setting
+# PYTHONIOENCODING forces the child interpreter to use UTF-8 regardless.
+_SKILL_SUBPROCESS_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
 
 class SkillLoader:
@@ -79,6 +93,7 @@ class SkillLoader:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(manifest.entrypoint.parent),
+                env=_SKILL_SUBPROCESS_ENV,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._timeout_seconds)

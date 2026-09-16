@@ -16,7 +16,8 @@
 - **Skill 热加载**（`skills/`, `skills_store/`）：`SkillLoader` 扫描 `skills_store/*/SKILL.md`（YAML front matter：`name`/`description`/`input_schema`），为每个 skill 起一个子进程（`sys.executable run.py --args-json '...'`，所有参数统一走一个 JSON blob，不用逐个映射成 CLI flag），捕获 stdout 当 Observation，同样注册进共享 `ToolRegistry`。有超时保护（默认 30s，超时会杀掉子进程），单个 skill 解析/加载失败只跳过它，不影响其他 skill 或程序启动。`skills_store/example_skill/`（`word_count`）是一个真实可跑的示例。
 - **细分市场洞察 Skill**（`skills_store/market_*`）：`market_new_products`/`market_tech_trends`/`market_company_moves` 三个 Skill，参数都是一个市场细分名称（比如 `"smartphone"`、`"electric vehicle"`），分别查该细分市场的新产品、新技术、主要公司动态资讯。数据源是 Google News 官方公开 RSS 订阅（不是爬虫），只读 GET、无需 API Key、标准库实现（`urllib`+`xml.etree`，零新增依赖）。挂在 `researcher` worker 的能力列表里。
 - **Multi-Agent：Leader-Worker 编排**（`agents/`）：`config/agents.json` 声明一个 leader + N 个 worker（名字/角色 system prompt/`capabilities` 能力白名单，`fnmatch` 模式匹配工具名）。所有 Agent 共享同一个 `ToolRegistry`，各自只能看到并调用 `ScopedToolRegistryView` 按 `capabilities` 过滤出的子集——过滤同时是展示层（`get_tool_specs()`）和强制边界（`dispatch()` 会拒绝越权调用，即使该工具确实存在于共享 registry 里）。每个 Worker 被包装成 Leader 能调用的普通工具 `delegate_to_<name>`（worker-as-tool 模式），只存在于 Leader 自己的视图里，Worker 之间结构性地无法互相委派。`core/react_engine.py` 完全不知道 Multi-Agent 存在——委派就是一次普通的工具调用。Leader 在同一轮里可以并发委派给多个 Worker（`asyncio.gather`，本地 JSON 存储都加了 per-instance 锁应对并发写）。白盒日志的每一行都带 `[agent_name]` 前缀和工具调用的 `call_id`，方便在多 Agent 并发交错的终端输出/JSONL 里按 Agent 和调用配对还原完整轨迹。`SequentialPipelineOrchestrator`/`DebateOrchestrator` 是留好接口的占位（`OrchestrationMode`），本轮只实现 Leader-Worker。
-- **对话式 Skill 自我扩展**（`tools/self_extend/`）：只有 `orchestrator` 有的高风险工具 `propose_new_skill`——LLM 判断现有工具/Skill/Worker 都做不到某件事时，自己写一个新 Skill 的完整 `run.py` 代码。结构性问题（非法名字、目录/工具名冲突、代码语法错误）在打扰人之前就拦掉；过了这些检查才会把**完整代码**（不是摘要）连同一份静态扫描警告（正则匹配 `subprocess`/`eval`/`exec`/`socket`/网络请求/文件写入等敏感模式，不是沙箱，只是把人的注意力引导到风险点）一起交给人工审批（复用现有 `ConfirmationChannel.confirm()`，没有新增接口）。批准后写入 `skills_store/<name>/`、调用 `SkillLoader.register_one()` 热注册进共享 `ToolRegistry`，并把新工具名加进 orchestrator 自己那个 `ScopedToolRegistryView` 的可见范围（`add_allowed_pattern()`），当场就能用，不需要重启。拒绝则什么文件都不写。**这段代码执行没有沙箱，权限等同 AuraAgent 本身**——责任在人工审批这一步，务必读代码而不是只看描述。
+- **对话式 Skill 自我扩展**（`tools/self_extend/`）：只有 `orchestrator` 有的高风险工具 `propose_new_skill`——LLM 判断现有工具/Skill/Worker 都做不到某件事时，自己写一个新 Skill 的完整 `run.py` 代码。结构性问题（非法名字、目录/工具名冲突、代码语法错误）在打扰人之前就拦掉；过了这些检查才会把**完整代码**（不是摘要）连同一份静态扫描警告（正则匹配 `subprocess`/`eval`/`exec`/`socket`/网络请求/文件写入等敏感模式，不是沙箱，只是把人的注意力引导到风险点）一起交给人工审批（复用现有 `ConfirmationChannel.confirm()`，没有新增接口）。批准后写入 `skills_store/<name>/`、调用 `SkillLoader.register_one()` 热注册进共享 `ToolRegistry`，并把新工具名加进 orchestrator 自己那个 `ScopedToolRegistryView` 的可见范围（`add_allowed_pattern()`），当场就能用，不需要重启。拒绝则什么文件都不写。**这段代码执行没有沙箱，权限等同 AuraAgent 本身**——责任在人工审批这一步，务必读代码而不是只看描述。**注意**：`add_allowed_pattern()` 只在当次运行的内存里生效，重启进程后要长期保留这个能力，需要手动把新工具名补进 `config/agents.json` 对应 Agent 的 `capabilities`（`make_pptx` 就是这样被正式收编进来的，见下一条）。
+- **`make_pptx`（一个通过自我扩展生成、再正式收编进仓库的真实 Skill）**：`python-pptx` 生成中文友好的 PowerPoint，`orchestrator` 直接可用。留作一个真实案例：Skill 从"对话中被 LLM 提议 → 人工审批 → 临时可用"到"手动补进 `config/agents.json` → 永久可用"的完整路径。过程中还顺带修了一个真实 bug：Windows 上子进程 stdout 走管道（不是真实控制台）时默认不会用 UTF-8，而是退回系统 ANSI codepage（比如中文系统的 GBK），导致任何 Skill 输出的中文在写进 Observation/JSONL 之前就已经被静默损坏成替换字符——不是终端显示问题，是数据本身错了。修复：`SkillLoader` 给子进程的环境变量强制加 `PYTHONIOENCODING=utf-8`。
 
 ## 运行方式
 
@@ -110,15 +111,15 @@ graph TD
 
 ### 核心抽象一览
 
-| 抽象 | 定义位置 | 职责 |
-|---|---|---|
-| `LLMProvider` | `providers/base.py` | 屏蔽厂商差异（Anthropic 的 `tool_use` block vs OpenAI 的 `tool_calls`），引擎只看 provider-neutral 的 `ConversationTurn`/`LLMResponse` |
-| `ToolRegistry` | `tools/registry.py` | 工具的唯一注册表：`register()`/`get_tool_specs()`/`dispatch()`，原生工具、MCP 工具、Skill 全部走同一个 `register()` |
-| `ScopedToolRegistryView` | `agents/scoped_tool_registry.py` | 每个 Agent 的能力边界：按 `capabilities` 过滤 `get_tool_specs()`（展示层），并在 `dispatch()` 里重新校验一遍（强制层）——两者缺一不可 |
-| `ConfirmationChannel` | `confirmation/base.py` | HITL 抽象：`confirm()`（Y/N）+ `ask_open_question()`（自由文本），引擎完全不知道它存在，只有具体工具 handler 会用 |
-| `AgentDefinition` / `AgentRegistry` | `agents/agent_definition.py`/`agent_registry.py` | 解析 `config/agents.json`，fail-fast 校验（有且仅有一个 leader、名字唯一合法、能力非空） |
-| `AsyncReActEngine` | `core/react_engine.py` | 真正的 Reason→Act→Observe 循环本体，全项目状态最少、职责最单一的一个类 |
-| `OrchestrationMode` | `agents/orchestration_mode.py` | 编排模式的可插拔接口，`LeaderWorkerOrchestrator` 是目前唯一的真实实现 |
+| 抽象                                    | 定义位置                                             | 职责                                                                                                                                          |
+| --------------------------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LLMProvider`                         | `providers/base.py`                                | 屏蔽厂商差异（Anthropic 的`tool_use` block vs OpenAI 的 `tool_calls`），引擎只看 provider-neutral 的 `ConversationTurn`/`LLMResponse` |
+| `ToolRegistry`                        | `tools/registry.py`                                | 工具的唯一注册表：`register()`/`get_tool_specs()`/`dispatch()`，原生工具、MCP 工具、Skill 全部走同一个 `register()`                   |
+| `ScopedToolRegistryView`              | `agents/scoped_tool_registry.py`                   | 每个 Agent 的能力边界：按`capabilities` 过滤 `get_tool_specs()`（展示层），并在 `dispatch()` 里重新校验一遍（强制层）——两者缺一不可   |
+| `ConfirmationChannel`                 | `confirmation/base.py`                             | HITL 抽象：`confirm()`（Y/N）+ `ask_open_question()`（自由文本），引擎完全不知道它存在，只有具体工具 handler 会用                         |
+| `AgentDefinition` / `AgentRegistry` | `agents/agent_definition.py`/`agent_registry.py` | 解析`config/agents.json`，fail-fast 校验（有且仅有一个 leader、名字唯一合法、能力非空）                                                     |
+| `AsyncReActEngine`                    | `core/react_engine.py`                             | 真正的 Reason→Act→Observe 循环本体，全项目状态最少、职责最单一的一个类                                                                      |
+| `OrchestrationMode`                   | `agents/orchestration_mode.py`                     | 编排模式的可插拔接口，`LeaderWorkerOrchestrator` 是目前唯一的真实实现                                                                       |
 
 ### 一次请求的完整生命周期
 
@@ -136,7 +137,6 @@ sequenceDiagram
         P-->>L: Thought + 一个或多个 Tool Call
         par 本轮所有工具调用并发派发
             L->>TV: dispatch(某个普通工具, args)
-        and
             L->>TV: dispatch(delegate_to_researcher, task)
         end
         TV->>W: worker_engine.run(task)
@@ -159,38 +159,38 @@ sequenceDiagram
 
 ### 安全边界设计一览
 
-| 风险点 | 设计手段 |
-|---|---|
-| 笔记工具文件系统越权 | `tools/notes/path_guard.py` 拒绝绝对路径和 `..` 穿越，越权直接报错而不是静默截断 |
-| 数学表达式注入 | `calculate` 用 `ast` 白名单手写递归解释器，全程不调用 `eval`/`exec`，压根不存在"沙箱逃逸"这个 bug 类别 |
-| 破坏性操作（删日历/删任务） | `ConfirmationChannel.confirm()` 终端 Y/N 确认，拒绝返回普通 Observation 而不是抛异常 |
-| Agent 越权调用工具 | `ScopedToolRegistryView.dispatch()` 强制重新校验 `capabilities`，不只是在 `get_tool_specs()` 展示层过滤——即使该工具真实存在于共享 registry 里也会被拒绝 |
-| Worker 互相委派 / 越权升级 | `delegate_to_<worker>` 工具只存在于 Leader 自己的 `extra_tools`，Worker 的视图构造时从不传入，结构性地摸不到 |
-| LLM 自己生成代码并执行 | `propose_new_skill`：非法名字/目录冲突/工具名冲突/语法错误先拦下来不打扰人；过审后**完整代码**（不是摘要）+ 静态扫描警告一起交给人工审批；批准后执行权限等同 AuraAgent 本身，**没有沙箱** |
-| 网页抓取滥用 | `fetch_url` 限制 scheme 白名单（拒绝 `file://`）、超时、响应体大小上限；已知局限不做 SSRF 的 IP 段过滤 |
-| 并发写本地 JSON 存储 | 日历/任务/记忆三个 provider 各自一把 `asyncio.Lock`，锁住整个方法体而不只是写操作 |
+| 风险点                      | 设计手段                                                                                                                                                                                                |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 笔记工具文件系统越权        | `tools/notes/path_guard.py` 拒绝绝对路径和 `..` 穿越，越权直接报错而不是静默截断                                                                                                                    |
+| 数学表达式注入              | `calculate` 用 `ast` 白名单手写递归解释器，全程不调用 `eval`/`exec`，压根不存在"沙箱逃逸"这个 bug 类别                                                                                          |
+| 破坏性操作（删日历/删任务） | `ConfirmationChannel.confirm()` 终端 Y/N 确认，拒绝返回普通 Observation 而不是抛异常                                                                                                                  |
+| Agent 越权调用工具          | `ScopedToolRegistryView.dispatch()` 强制重新校验 `capabilities`，不只是在 `get_tool_specs()` 展示层过滤——即使该工具真实存在于共享 registry 里也会被拒绝                                         |
+| Worker 互相委派 / 越权升级  | `delegate_to_<worker>` 工具只存在于 Leader 自己的 `extra_tools`，Worker 的视图构造时从不传入，结构性地摸不到                                                                                        |
+| LLM 自己生成代码并执行      | `propose_new_skill`：非法名字/目录冲突/工具名冲突/语法错误先拦下来不打扰人；过审后**完整代码**（不是摘要）+ 静态扫描警告一起交给人工审批；批准后执行权限等同 AuraAgent 本身，**没有沙箱** |
+| 网页抓取滥用                | `fetch_url` 限制 scheme 白名单（拒绝 `file://`）、超时、响应体大小上限；已知局限不做 SSRF 的 IP 段过滤                                                                                              |
+| 并发写本地 JSON 存储        | 日历/任务/记忆三个 provider 各自一把`asyncio.Lock`，锁住整个方法体而不只是写操作                                                                                                                      |
 
 ### 可扩展性：加一个新能力要改哪些文件
 
 这是"插件优先"原则的直接体现——下表每一行都不需要碰 `core/react_engine.py`：
 
-| 想加什么 | 需要改的地方 |
-|---|---|
-| 一个新的原生工具 | 新建 `tools/<name>/`，在 `main.py` 里调一次 `register_x_tools(registry, ...)` |
-| 一个新的 MCP Server | 只改 `config/mcp_servers.json`，加一条 `{"name", "command", "args"}` |
-| 一个新的 Skill | 只加 `skills_store/<name>/`（`SKILL.md` + `run.py`），启动时自动扫描发现；或者让 LLM 通过 `propose_new_skill` 在对话中自己提议 |
-| 一个新的 Agent（含定位、能力、可选新 Skill） | 只改 `config/agents.json`，加一条 worker 声明 |
-| 一种新的编排模式 | 实现 `agents/orchestration_mode.py` 的 `OrchestrationMode` 接口（`SequentialPipelineOrchestrator`/`DebateOrchestrator` 已经是留好的真实占位） |
+| 想加什么                                     | 需要改的地方                                                                                                                                         |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 一个新的原生工具                             | 新建`tools/<name>/`，在 `main.py` 里调一次 `register_x_tools(registry, ...)`                                                                   |
+| 一个新的 MCP Server                          | 只改`config/mcp_servers.json`，加一条 `{"name", "command", "args"}`                                                                              |
+| 一个新的 Skill                               | 只加`skills_store/<name>/`（`SKILL.md` + `run.py`），启动时自动扫描发现；或者让 LLM 通过 `propose_new_skill` 在对话中自己提议                |
+| 一个新的 Agent（含定位、能力、可选新 Skill） | 只改`config/agents.json`，加一条 worker 声明                                                                                                       |
+| 一种新的编排模式                             | 实现`agents/orchestration_mode.py` 的 `OrchestrationMode` 接口（`SequentialPipelineOrchestrator`/`DebateOrchestrator` 已经是留好的真实占位） |
 
 ## 路标
 
 当前是一个更大的路标的一部分（完整技术方案见本次规划会话的 Claude Code 计划文件）：
 
-| Epic | 内容 | 状态 |
-|---|---|---|
-| A | 记忆工具 + `ask_human` | ✅ 已完成 |
-| B | MCP `stdio` 客户端真实连接 + 工具动态注册 | ✅ 已完成 |
-| C | Skill 热加载真实实现（解析 `SKILL.md`） | ✅ 已完成 |
-| D | Multi-Agent 基础设施 + Leader-Worker 编排（进程内，`worker-as-tool` 模式，并发工具派发） | ✅ 已完成 |
-| F | 对话式 Skill 自我扩展（`propose_new_skill` + 人工代码审批 + 热加载） | ✅ 已完成 |
-| E | 其他编排模式、FastAPI 封装、Google Calendar OAuth、A2A 协议对外互通、MCP 自我扩展 | 更远期，仅占位 |
+| Epic | 内容                                                                                       | 状态           |
+| ---- | ------------------------------------------------------------------------------------------ | -------------- |
+| A    | 记忆工具 +`ask_human`                                                                    | ✅ 已完成      |
+| B    | MCP`stdio` 客户端真实连接 + 工具动态注册                                                 | ✅ 已完成      |
+| C    | Skill 热加载真实实现（解析`SKILL.md`）                                                   | ✅ 已完成      |
+| D    | Multi-Agent 基础设施 + Leader-Worker 编排（进程内，`worker-as-tool` 模式，并发工具派发） | ✅ 已完成      |
+| F    | 对话式 Skill 自我扩展（`propose_new_skill` + 人工代码审批 + 热加载）                     | ✅ 已完成      |
+| E    | 其他编排模式、FastAPI 封装、Google Calendar OAuth、A2A 协议对外互通、MCP 自我扩展          | 更远期，仅占位 |

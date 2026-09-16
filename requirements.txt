@@ -8,6 +8,7 @@ rich>=13.7
 pyfiglet>=1.0
 httpx>=0.27
 mcp>=2.0
+python-pptx>=1.0  # used by skills_store/make_pptx (a self-extension-generated skill)
 
 # --- dev / test only ---
 pytest>=8.0
