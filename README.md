@@ -72,6 +72,116 @@ AuraAgent/
 └── tests/                  # pytest 单测
 ```
 
+## AuraAgent 架构设计
+
+### 设计哲学
+
+- **白盒优先**：不用任何"黑盒" Agent 框架（LangChain 之类），从最基础的 ReAct 循环到最上层的 Multi-Agent 编排全部原生实现，建立在官方 SDK 之上。每一轮 Thought / Tool Call / Observation 都被打印到终端、写进 `logs/session-*.jsonl`，可见、可回放、可审计——这是整个项目最早定下、也贯穿始终的第一原则。
+- **插件优先 / 严格解耦**：`core/react_engine.py` 是全项目唯一的"引擎"，但它不 import `tools/`、`providers/`、`confirmation/`、`agents/` 下任何具体实现——只依赖几个抽象接口。新增一个工具来源（MCP）、一种能力载体（Skill）、一套编排模式（Multi-Agent）都不需要改引擎一行代码。
+- **小步演进，随时可跑**：整个项目是按 Epic（A 记忆/ask_human → B MCP → C Skill → D Multi-Agent → F 自我扩展）一批批加出来的，每一批都独立可运行、有真实测试覆盖、经过真实 LLM 端到端验证后才提交。没有"半成品"状态。
+- **安全默认，风险分级处理**：能从架构上消除的风险就消除（`calculate` 用手写 AST 解释器而不是 `eval`，笔记工具强制沙箱路径），不能消除的风险交给人（破坏性操作走 HITL 确认，LLM 自己生成代码必须经过人工审查完整源码才能执行）。
+
+### 分层架构
+
+```mermaid
+graph TD
+    Main["main.py<br/>组合根：唯一知道所有具体实现的地方"]
+
+    Main -->|构造| Engine["AsyncReActEngine<br/>core/react_engine.py"]
+    Main -->|构造| AgentReg["AgentRegistry<br/>解析 config/agents.json"]
+
+    Engine -->|只依赖抽象| LLMProvider["LLMProvider 接口"]
+    LLMProvider -.两个实现.-> Anthropic["AnthropicProvider"]
+    LLMProvider -.两个实现.-> OpenAI["OpenAIProvider（也服务 DeepSeek）"]
+
+    Engine -->|只依赖抽象| ToolView["ScopedToolRegistryView<br/>每个 Agent 一份，agents/"]
+    ToolView -->|过滤 + 强制校验| Registry["ToolRegistry<br/>全项目唯一共享单例"]
+
+    Native["原生工具<br/>notes / calendar / tasks / calc / web / memory / human"] -->|register| Registry
+    MCPSrc["MCP Server<br/>mcp_integration/"] -->|register| Registry
+    SkillSrc["Skill 脚本<br/>skills_store/*"] -->|register| Registry
+    SelfExtend["propose_new_skill<br/>tools/self_extend/"] -->|运行时热 register| Registry
+
+    Native -.高风险操作走.-> Confirmation["ConfirmationChannel<br/>HITL 抽象"]
+    SelfExtend -.完整代码审查走.-> Confirmation
+```
+
+核心信息：**引擎在最中间，只认接口；三种工具来源 + 一种运行时自我扩展机制，最终都汇流到同一个 `ToolRegistry`**。这个"汇流"设计是整个架构能长期扩展而不腐化的关键——`core/react_engine.py` 从第一行代码到现在，签名和职责完全没变过。
+
+### 核心抽象一览
+
+| 抽象 | 定义位置 | 职责 |
+|---|---|---|
+| `LLMProvider` | `providers/base.py` | 屏蔽厂商差异（Anthropic 的 `tool_use` block vs OpenAI 的 `tool_calls`），引擎只看 provider-neutral 的 `ConversationTurn`/`LLMResponse` |
+| `ToolRegistry` | `tools/registry.py` | 工具的唯一注册表：`register()`/`get_tool_specs()`/`dispatch()`，原生工具、MCP 工具、Skill 全部走同一个 `register()` |
+| `ScopedToolRegistryView` | `agents/scoped_tool_registry.py` | 每个 Agent 的能力边界：按 `capabilities` 过滤 `get_tool_specs()`（展示层），并在 `dispatch()` 里重新校验一遍（强制层）——两者缺一不可 |
+| `ConfirmationChannel` | `confirmation/base.py` | HITL 抽象：`confirm()`（Y/N）+ `ask_open_question()`（自由文本），引擎完全不知道它存在，只有具体工具 handler 会用 |
+| `AgentDefinition` / `AgentRegistry` | `agents/agent_definition.py`/`agent_registry.py` | 解析 `config/agents.json`，fail-fast 校验（有且仅有一个 leader、名字唯一合法、能力非空） |
+| `AsyncReActEngine` | `core/react_engine.py` | 真正的 Reason→Act→Observe 循环本体，全项目状态最少、职责最单一的一个类 |
+| `OrchestrationMode` | `agents/orchestration_mode.py` | 编排模式的可插拔接口，`LeaderWorkerOrchestrator` 是目前唯一的真实实现 |
+
+### 一次请求的完整生命周期
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant L as Leader 引擎 (orchestrator)
+    participant P as LLMProvider
+    participant TV as ScopedToolRegistryView
+    participant W as Worker 引擎 (researcher/scheduler)
+
+    U->>L: 一句自然语言指令
+    loop 每一轮 Reason-Act-Observe
+        L->>P: send(system_prompt, history, tool_specs)
+        P-->>L: Thought + 一个或多个 Tool Call
+        par 本轮所有工具调用并发派发
+            L->>TV: dispatch(某个普通工具, args)
+        and
+            L->>TV: dispatch(delegate_to_researcher, task)
+        end
+        TV->>W: worker_engine.run(task)
+        Note over W: Worker 自己完整跑一遍<br/>独立的 Reason-Act-Observe 循环
+        W-->>TV: 最终回答字符串
+        TV-->>L: 汇总所有 Observation
+    end
+    L-->>U: 最终回答
+```
+
+几个不直观、但很关键的实现细节：
+
+1. **工具列表不是启动时冻结的**：`registry.get_tool_specs()` 在循环的**每一轮**都重新调用，不是引擎构造时缓存一次——这就是为什么 `propose_new_skill` 批准后新工具**当场**可用、不需要重启进程。
+2. **并发不是"多线程"**，是 `asyncio.gather(..., return_exceptions=True)`：一轮里 LLM 如果同时请求好几个工具调用（包括同时委派给多个 Worker），会真的并发跑，其中一个失败也不会牵连其他——这也是本地 JSON 存储（日历/任务/记忆）都要加 `asyncio.Lock` 的原因。
+3. **委派 Worker 本质上就是一次普通工具调用**：`delegate_to_researcher` 这个"工具"的 handler 里就是 `await worker_engine.run(task)`——`core/react_engine.py` 全程不知道 Multi-Agent 存在，Worker 的引擎是提前构造好、反复复用的（因为 `run()` 每次都是无状态的局部变量）。
+
+### 白盒可观测性设计
+
+`core/logger.py` 是双写设计：终端用 `rich` 打印彩色面板给人看，同时每一步都写一条结构化 JSON 到 `logs/session-*.jsonl` 给机器/未来的 Web 后端看，两者互不依赖。Multi-Agent 上线后每条记录都带 `agent_name`（顶层字段，不是塞进 payload）和工具调用的 `call_id`——因为多个 Worker 并发跑意味着终端打印顺序不再保证连续，靠这两个字段才能把交错的输出重新按 Agent、按调用配对回放。（这里踩过一个真实的坑：`rich` 默认把字符串里的方括号当成它自己的 markup 语法解析掉，`[agent_name]` 前缀和 `list_tasks` 这类 `- [id] ...` 格式的 Observation 曾经被静默吞掉过，后来统一用 `rich.markup.escape()` 修复。)
+
+### 安全边界设计一览
+
+| 风险点 | 设计手段 |
+|---|---|
+| 笔记工具文件系统越权 | `tools/notes/path_guard.py` 拒绝绝对路径和 `..` 穿越，越权直接报错而不是静默截断 |
+| 数学表达式注入 | `calculate` 用 `ast` 白名单手写递归解释器，全程不调用 `eval`/`exec`，压根不存在"沙箱逃逸"这个 bug 类别 |
+| 破坏性操作（删日历/删任务） | `ConfirmationChannel.confirm()` 终端 Y/N 确认，拒绝返回普通 Observation 而不是抛异常 |
+| Agent 越权调用工具 | `ScopedToolRegistryView.dispatch()` 强制重新校验 `capabilities`，不只是在 `get_tool_specs()` 展示层过滤——即使该工具真实存在于共享 registry 里也会被拒绝 |
+| Worker 互相委派 / 越权升级 | `delegate_to_<worker>` 工具只存在于 Leader 自己的 `extra_tools`，Worker 的视图构造时从不传入，结构性地摸不到 |
+| LLM 自己生成代码并执行 | `propose_new_skill`：非法名字/目录冲突/工具名冲突/语法错误先拦下来不打扰人；过审后**完整代码**（不是摘要）+ 静态扫描警告一起交给人工审批；批准后执行权限等同 AuraAgent 本身，**没有沙箱** |
+| 网页抓取滥用 | `fetch_url` 限制 scheme 白名单（拒绝 `file://`）、超时、响应体大小上限；已知局限不做 SSRF 的 IP 段过滤 |
+| 并发写本地 JSON 存储 | 日历/任务/记忆三个 provider 各自一把 `asyncio.Lock`，锁住整个方法体而不只是写操作 |
+
+### 可扩展性：加一个新能力要改哪些文件
+
+这是"插件优先"原则的直接体现——下表每一行都不需要碰 `core/react_engine.py`：
+
+| 想加什么 | 需要改的地方 |
+|---|---|
+| 一个新的原生工具 | 新建 `tools/<name>/`，在 `main.py` 里调一次 `register_x_tools(registry, ...)` |
+| 一个新的 MCP Server | 只改 `config/mcp_servers.json`，加一条 `{"name", "command", "args"}` |
+| 一个新的 Skill | 只加 `skills_store/<name>/`（`SKILL.md` + `run.py`），启动时自动扫描发现；或者让 LLM 通过 `propose_new_skill` 在对话中自己提议 |
+| 一个新的 Agent（含定位、能力、可选新 Skill） | 只改 `config/agents.json`，加一条 worker 声明 |
+| 一种新的编排模式 | 实现 `agents/orchestration_mode.py` 的 `OrchestrationMode` 接口（`SequentialPipelineOrchestrator`/`DebateOrchestrator` 已经是留好的真实占位） |
+
 ## 路标
 
 当前是一个更大的路标的一部分（完整技术方案见本次规划会话的 Claude Code 计划文件）：
