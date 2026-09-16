@@ -90,3 +90,44 @@ async def test_timeout_kills_process_and_raises(tmp_path):
     with pytest.raises(ToolExecutionError) as exc_info:
         await registry.dispatch("slow_skill", {})
     assert "timed out" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_register_one_registers_a_single_directory_directly(tmp_path):
+    """register_one() is the public seam propose_new_skill's hot-reload
+    path uses (tools/self_extend/propose_skill_tool.py) — verify it works
+    standalone, not just via scan_and_register()'s loop over it."""
+    _write_skill(
+        tmp_path,
+        "standalone",
+        skill_md="---\nname: standalone_skill\ndescription: registered directly\n---\nbody\n",
+        run_py="import argparse, json\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--args-json', required=True)\n"
+        "args = p.parse_args()\n"
+        "print('got:', json.loads(args.args_json))",
+    )
+    registry = ToolRegistry()
+    loader = SkillLoader(tmp_path, registry)
+
+    name = loader.register_one(tmp_path / "standalone")
+
+    assert name == "standalone_skill"
+    result = await registry.dispatch("standalone_skill", {"x": 1})
+    assert "got:" in result
+
+
+def test_register_one_raises_on_bad_manifest_instead_of_silently_skipping(tmp_path):
+    """Unlike scan_and_register() (which logs-and-skips a bad skill),
+    register_one() must propagate the error so propose_new_skill's caller
+    can roll back the half-installed directory it just wrote."""
+    from skills.skill_schema import SkillManifestError
+
+    skill_dir = tmp_path / "bad"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("no front matter\n", encoding="utf-8")
+
+    registry = ToolRegistry()
+    loader = SkillLoader(tmp_path, registry)
+
+    with pytest.raises(SkillManifestError):
+        loader.register_one(skill_dir)

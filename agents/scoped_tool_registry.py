@@ -44,11 +44,26 @@ class ScopedToolRegistryView:
         extra_tools: dict[str, RegisteredTool] | None = None,
     ) -> None:
         self._underlying = underlying
-        self._allowed_patterns = allowed_patterns
+        # Copied, not aliased: `allowed_patterns` is typically an
+        # AgentDefinition.capabilities list. add_allowed_pattern() below
+        # mutates this view's own copy — it must never leak into the
+        # (supposedly immutable, frozen=True) AgentDefinition the caller
+        # passed in.
+        self._allowed_patterns = list(allowed_patterns)
         self._extra_tools = extra_tools or {}
 
     def _is_allowed(self, tool_name: str) -> bool:
         return any(fnmatch(tool_name, pattern) for pattern in self._allowed_patterns)
+
+    def add_allowed_pattern(self, pattern: str) -> None:
+        """Widen this view's own visibility at runtime — used by
+        propose_new_skill so the orchestrator can immediately call a skill
+        it just had approved, in the same or a later turn, without this
+        view's capabilities list having predicted the skill's name ahead
+        of time. get_tool_specs()/dispatch() both re-read
+        `_allowed_patterns` fresh on every call (no caching), so this
+        takes effect immediately."""
+        self._allowed_patterns.append(pattern)
 
     def get_tool_specs(self) -> list[ToolSpec]:
         visible = [spec for spec in self._underlying.get_tool_specs() if self._is_allowed(spec.name)]

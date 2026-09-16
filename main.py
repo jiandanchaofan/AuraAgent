@@ -35,6 +35,7 @@ from tools.memory.memory_store import MemoryStore
 from tools.memory.memory_tool import register_memory_tools
 from tools.notes.notes_tool import register_notes_tools
 from tools.registry import ToolRegistry
+from tools.self_extend.propose_skill_tool import register_propose_skill_tool
 from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
 from tools.tasks.task_tool import register_task_tools
 from tools.web.fetch_url_tool import build_default_http_client, register_fetch_url_tools
@@ -66,7 +67,8 @@ async def main() -> None:
     mcp_manager = MCPClientManager(settings.mcp_config_path, registry)
     await mcp_manager.connect_all()
 
-    SkillLoader(settings.skills_dir, registry, settings.skill_timeout_seconds).scan_and_register()
+    skill_loader = SkillLoader(settings.skills_dir, registry, settings.skill_timeout_seconds)
+    skill_loader.scan_and_register()
 
     provider: LLMProvider
     if settings.llm_provider == "openai":
@@ -102,6 +104,19 @@ async def main() -> None:
 
     leader = agent_registry.leader
     leader_view = ScopedToolRegistryView(registry, leader.capabilities, extra_tools=leader_extra_tools)
+
+    # propose_new_skill is Leader-only self-extension (see
+    # tools/self_extend/propose_skill_tool.py) — registered into the
+    # shared registry like any native tool (visibility still governed by
+    # `capabilities` in config/agents.json), but it also needs a way to
+    # widen the Leader's OWN view once it installs something new, since a
+    # freshly created skill's name can't have been predicted by the
+    # static capabilities list ahead of time.
+    register_propose_skill_tool(
+        registry, skill_loader, settings.skills_dir, confirmation_channel,
+        grant_access=leader_view.add_allowed_pattern,
+    )
+
     leader_engine = AsyncReActEngine(
         provider=provider,
         registry=leader_view,

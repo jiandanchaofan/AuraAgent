@@ -94,6 +94,34 @@ def test_view_without_extra_tools_never_exposes_delegate_tools(shared_registry):
 
 
 @pytest.mark.asyncio
+async def test_add_allowed_pattern_widens_visibility_and_dispatch_immediately(shared_registry):
+    """Backs propose_new_skill's hot-reload flow: a freshly installed
+    skill's name can't have been predicted by the static capabilities
+    list, so the caller widens its own view at runtime."""
+    view = ScopedToolRegistryView(shared_registry, ["*task*"])
+    assert "fetch_url" not in {s.name for s in view.get_tool_specs()}
+    with pytest.raises(ToolExecutionError):
+        await view.dispatch("fetch_url", {})
+
+    view.add_allowed_pattern("fetch_url")
+
+    assert "fetch_url" in {s.name for s in view.get_tool_specs()}
+    assert await view.dispatch("fetch_url", {}) == "ok"
+
+
+def test_add_allowed_pattern_does_not_mutate_the_caller_supplied_list(shared_registry):
+    """allowed_patterns is typically an AgentDefinition.capabilities list
+    (frozen=True dataclass) — add_allowed_pattern must only grow this
+    view's own copy, never leak the mutation back into that object."""
+    original_patterns = ["*task*"]
+    view = ScopedToolRegistryView(shared_registry, original_patterns)
+
+    view.add_allowed_pattern("fetch_url")
+
+    assert original_patterns == ["*task*"]
+
+
+@pytest.mark.asyncio
 async def test_shared_registry_state_is_visible_across_views(shared_registry):
     """Two different scoped views over the SAME underlying registry see
     each other's effects — there is exactly one source of truth, per the

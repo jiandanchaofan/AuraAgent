@@ -45,20 +45,29 @@ class SkillLoader:
             return []
 
         registered: list[str] = []
-        # Resolve to absolute paths up front: manifest.entrypoint is later
-        # passed as a subprocess arg alongside `cwd=entrypoint.parent` — if
-        # entrypoint were still relative, the child process would resolve
-        # it relative to that same cwd a second time, doubling the path.
-        for skill_dir in sorted(p for p in self._skills_dir.resolve().iterdir() if p.is_dir()):
+        for skill_dir in sorted(p for p in self._skills_dir.iterdir() if p.is_dir()):
             try:
-                manifest = parse_skill_manifest(skill_dir)
+                registered.append(self.register_one(skill_dir))
             except SkillManifestError as exc:
                 print(f"[Skills] Failed to load skill from '{skill_dir.name}': {exc}")
                 continue
-            self._register_skill(manifest)
-            registered.append(manifest.name)
-            print(f"[Skills] Registered skill '{manifest.name}' from '{skill_dir.name}'.")
         return registered
+
+    def register_one(self, skill_dir: Path) -> str:
+        """Parse and register exactly one skill directory into the shared
+        ToolRegistry. Raises SkillManifestError on a bad manifest — callers
+        decide whether to skip-and-continue (scan_and_register, at startup)
+        or surface the failure directly (propose_new_skill, mid-conversation
+        self-extension — see tools/self_extend/propose_skill_tool.py).
+        """
+        # Resolved to an absolute path up front: manifest.entrypoint is
+        # later passed as a subprocess arg alongside `cwd=entrypoint.parent`
+        # — if entrypoint were still relative, the child process would
+        # resolve it relative to that same cwd a second time, doubling it.
+        manifest = parse_skill_manifest(skill_dir.resolve())
+        self._register_skill(manifest)
+        print(f"[Skills] Registered skill '{manifest.name}' from '{skill_dir.name}'.")
+        return manifest.name
 
     def _register_skill(self, manifest: SkillManifest) -> None:
         async def handler(args: dict[str, Any]) -> str:
