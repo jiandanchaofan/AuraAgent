@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
+
 from config.settings import load_settings
 from confirmation.terminal_channel import TerminalConfirmationChannel
 from core.logger import AuraLogger, print_banner
@@ -20,10 +22,12 @@ from core.react_engine import AsyncReActEngine
 from providers.anthropic_provider import AnthropicProvider
 from providers.base import LLMProvider
 from providers.openai_provider import OpenAIProvider
+from tools.calc.calculate_tool import register_calculate_tools
 from tools.calendar.calendar_tool import register_calendar_tools
 from tools.calendar.local_json_calendar import LocalJSONCalendarProvider
 from tools.notes.notes_tool import register_notes_tools
 from tools.registry import ToolRegistry
+from tools.web.fetch_url_tool import register_fetch_url_tools
 
 SYSTEM_PROMPT = (
     "You are AuraAgent, a personal AI assistant with access to a sandboxed "
@@ -45,6 +49,12 @@ async def main() -> None:
     calendar_provider = LocalJSONCalendarProvider(settings.calendar_events_file)
     confirmation_channel = TerminalConfirmationChannel()
     register_calendar_tools(registry, calendar_provider, confirmation_channel)
+
+    register_calculate_tools(registry)
+    http_client = httpx.AsyncClient()
+    register_fetch_url_tools(
+        registry, http_client, settings.fetch_url_timeout_seconds, settings.fetch_url_max_bytes
+    )
     # MCP / Skill registration land in a later iteration — see
     # mcp_integration/ and skills/ for their scaffolded seams.
 
@@ -64,21 +74,24 @@ async def main() -> None:
         max_turns=settings.max_turns,
     )
 
-    print_banner(f"v1 — asyncio ReAct + Markdown notes + local calendar  |  provider={settings.llm_provider} model={settings.model_id}  |  type 'exit' to quit")
-    while True:
-        try:
-            user_input = input("You> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        if not user_input:
-            continue
-        if user_input.lower() in {"exit", "quit"}:
-            break
-        try:
-            await engine.run(user_input)
-        except Exception as exc:  # noqa: BLE001 - keep the REPL alive on unexpected errors
-            print(f"[ERROR] {type(exc).__name__}: {exc}")
+    print_banner(f"AuraAgent, developed by James Jiang | provider={settings.llm_provider} model={settings.model_id} | type 'exit' to quit")
+    try:
+        while True:
+            try:
+                user_input = input("You> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not user_input:
+                continue
+            if user_input.lower() in {"exit", "quit"}:
+                break
+            try:
+                await engine.run(user_input)
+            except Exception as exc:  # noqa: BLE001 - keep the REPL alive on unexpected errors
+                print(f"[ERROR] {type(exc).__name__}: {exc}")
+    finally:
+        await http_client.aclose()
 
 
 if __name__ == "__main__":
