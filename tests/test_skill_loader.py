@@ -35,6 +35,24 @@ async def test_loads_and_calls_the_real_example_skill():
     assert result == "5"
 
 
+def test_all_shipped_market_insight_skills_parse_and_register():
+    """Structural-only check for the three market-insight skills (they hit
+    real Google News RSS when actually called, so no network dispatch
+    here — just confirming SkillLoader can discover and register them,
+    each with a distinct name and a `segment` input field)."""
+    registry = ToolRegistry()
+    loader = SkillLoader(REAL_SKILLS_STORE, registry)
+
+    registered = loader.scan_and_register()
+
+    for name in ("market_new_products", "market_tech_trends", "market_company_moves"):
+        assert name in registered, f"{name} was not discovered/registered"
+
+    specs_by_name = {s.name: s for s in registry.get_tool_specs()}
+    for name in ("market_new_products", "market_tech_trends", "market_company_moves"):
+        assert "segment" in specs_by_name[name].input_schema["properties"]
+
+
 def test_broken_skill_is_skipped_without_blocking_others(tmp_path):
     _write_skill(
         tmp_path,
