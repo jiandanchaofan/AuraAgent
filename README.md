@@ -25,6 +25,11 @@
 
   真实端到端验证 `propose_mcp_server` 时还顺带发现并修了一个真实并发 bug：自我扩展工具调用发生在 `core/react_engine.py` 并发派发生成的**独立 asyncio Task** 里，而 `anyio` 的 cancel scope 要求进入和退出必须在同一个 Task——旧版 `MCPClientManager` 在这种场景下连接服务器后，进程退出时会抛 `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`。修复：把所有连接/关闭操作都路由到一个常驻的 "owner task"（通过 `asyncio.Queue` 传递指令），无论调用方身处哪个 Task 都能安全操作。
 - **`make_pptx`（一个通过自我扩展生成、再正式收编进仓库的真实 Skill）**：`python-pptx` 生成中文友好的 PowerPoint，`orchestrator` 直接可用。留作一个真实案例：Skill 从"对话中被 LLM 提议 → 人工审批 → 临时可用"到"永久可用"的完整路径（这条路径现在是全自动持久化，不再需要手动补 `config/agents.json`）。过程中还顺带修了一个真实 bug：Windows 上子进程 stdout 走管道（不是真实控制台）时默认不会用 UTF-8，而是退回系统 ANSI codepage（比如中文系统的 GBK），导致任何 Skill 输出的中文在写进 Observation/JSONL 之前就已经被静默损坏成替换字符——不是终端显示问题，是数据本身错了。修复：`SkillLoader` 给子进程的环境变量强制加 `PYTHONIOENCODING=utf-8`。
+- **人工直连 CLI 命令层**（`cli/`）：REPL 里以 `/` 开头的一行**不会**变成发给 orchestrator 的用户消息，而是被 `dispatch_command()` 直接拦下处理——这是跟"LLM 提议 + 人工审批"（`tools/self_extend/`）并列的**第二条通道**，服务同一批底层能力（新增/移除团队成员、安装 Skill），只是触发者是人、不是 LLM，所以跳过"结构性预检查 → 人工审批"里的审批一环（人已经是审批者本身），但复用完全相同的构造/持久化辅助函数（`agents/agent_builder.py`、`agents/agent_config_writer.py`），两条通道不会走出两套不一致的行为。命令**完全不经过** `core/react_engine.py`、LLM 或 `logs/session-*.jsonl`——这是 `/config set-key` 的安全性所在：输入的 API Key 只会进 `.env` 和一个内存字典，不会被任何会记录/展示给 LLM 的东西碰到。
+  - `/config` [`use <provider> <model_id>` | `set-key <provider>`]：查看/切换 provider+model（Key 打码显示）、掩码输入并保存/更新 API Key（标准库 `getpass`，`.env` 写入复用已有依赖 `python-dotenv` 的 `set_key()`）。切换生效依赖新增的 `providers/swappable_provider.py`：所有引擎（Leader、每个 Worker、以及 `propose_new_agent`/`/agents add` 建的新 Worker）持有的都是**同一个** `SwappableProvider` 实例而不是具体 provider 对象，`/config use` 换的是这一个共享对象内部指向的具体 provider，不需要逐个引擎去改。
+  - `/agents` [`add` | `remove <name>`]：查看/新增/移除团队成员。`add` 交互式收集 `name`/`system_prompt`/`capabilities`，构造+碰撞检查复用 `propose_new_agent` 抽出来的同一份 `agents/agent_builder.ensure_worker_name_available()`，最终仍会请人确认一次（防误输入，不是防 LLM 越权）。
+  - `/skills` [`load <url>` | `install <local_path>`]：查看已安装 Skill；从网页链接下载或本地文件安装一个 Skill 包（`.zip`，含 `SKILL.md`+`run.py`）。校验（`cli/skill_package.py`）拒绝非法 zip、路径穿越（zip-slip）、结构不明确（顶层不止一个候选目录）的包，5MB 大小上限；**完整代码**+静态扫描警告一起打印给人看，审查强度跟 `propose_new_skill` 完全一致——代码的**来源**是外部下载/上传而不是 LLM 现场生成，不代表可以降低审查标准。
+  - 三个命令批准后走的都是同一套热注册+持久化路径（`agents/agent_config_writer.py`/`mcp_integration/mcp_config_writer.py`），跟自我扩展工具一样重启后依然生效。
 
 ## 运行方式
 
@@ -68,7 +73,8 @@ AuraAgent/
 ├── config/                 # 配置加载 (pydantic-settings) + agents.json / mcp_servers.json
 ├── core/                   # ReAct 引擎、日志、异常、消息类型（不依赖任何具体实现）
 ├── agents/                 # Multi-Agent：AgentDefinition/Registry、ScopedToolRegistryView、编排模式
-├── providers/               # LLMProvider 抽象层 + Anthropic 实现
+├── cli/                    # 人工直连 "/" 命令层（/help /config /agents /skills），不经过引擎/LLM
+├── providers/               # LLMProvider 抽象层 + Anthropic/OpenAI 实现 + SwappableProvider（运行时切换）
 ├── tools/                  # ToolRegistry + notes/calendar/tasks/calc/web/memory/human 工具
 ├── confirmation/            # Human-in-the-loop 确认通道抽象
 ├── mcp_integration/         # MCP 客户端（真实实现：stdio 连接 + 工具适配）
@@ -89,7 +95,7 @@ AuraAgent/
 
 - **白盒优先**：不用任何"黑盒" Agent 框架（LangChain 之类），从最基础的 ReAct 循环到最上层的 Multi-Agent 编排全部原生实现，建立在官方 SDK 之上。每一轮 Thought / Tool Call / Observation 都被打印到终端、写进 `logs/session-*.jsonl`，可见、可回放、可审计——这是整个项目最早定下、也贯穿始终的第一原则。
 - **插件优先 / 严格解耦**：`core/react_engine.py` 是全项目唯一的"引擎"，但它不 import `tools/`、`providers/`、`confirmation/`、`agents/` 下任何具体实现——只依赖几个抽象接口。新增一个工具来源（MCP）、一种能力载体（Skill）、一套编排模式（Multi-Agent）都不需要改引擎一行代码。
-- **小步演进，随时可跑**：整个项目是按 Epic（A 记忆/ask_human → B MCP → C Skill → D Multi-Agent → F 自我扩展一期 → H 自我扩展二期）一批批加出来的，每一批都独立可运行、有真实测试覆盖、经过真实 LLM 端到端验证后才提交。没有"半成品"状态。
+- **小步演进，随时可跑**：整个项目是按 Epic（A 记忆/ask_human → B MCP → C Skill → D Multi-Agent → F 自我扩展一期 → H 自我扩展二期 → I CLI 命令层）一批批加出来的，每一批都独立可运行、有真实测试覆盖、经过真实 LLM 端到端验证后才提交。没有"半成品"状态。
 - **安全默认，风险分级处理**：能从架构上消除的风险就消除（`calculate` 用手写 AST 解释器而不是 `eval`，笔记工具强制沙箱路径），不能消除的风险交给人（破坏性操作走 HITL 确认，LLM 自己生成代码必须经过人工审查完整源码才能执行）。
 
 ### 分层架构
@@ -191,8 +197,8 @@ sequenceDiagram
 | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 一个新的原生工具                             | 新建`tools/<name>/`，在 `main.py` 里调一次 `register_x_tools(registry, ...)`                                                                   |
 | 一个新的 MCP Server                          | 只改`config/mcp_servers.json`，加一条 `{"name", "command", "args"}`；或者让 LLM 通过 `propose_mcp_server` 在对话中自己提议（人工审批 + 手动填环境变量值） |
-| 一个新的 Skill                               | 只加`skills_store/<name>/`（`SKILL.md` + `run.py`），启动时自动扫描发现；或者让 LLM 通过 `propose_new_skill` 在对话中自己提议                |
-| 一个新的 Agent（含定位、能力、可选新 Skill） | 只改`config/agents.json`，加一条 worker 声明；或者让 LLM 通过 `propose_new_agent` 在对话中自己提议（能力只能来自已存在的工具）                     |
+| 一个新的 Skill                               | 只加`skills_store/<name>/`（`SKILL.md` + `run.py`），启动时自动扫描发现；或者让 LLM 通过 `propose_new_skill` 在对话中自己提议；或者人直接用 `/skills load\|install` 装一个外部 Skill 包 |
+| 一个新的 Agent（含定位、能力、可选新 Skill） | 只改`config/agents.json`，加一条 worker 声明；或者让 LLM 通过 `propose_new_agent` 在对话中自己提议（能力只能来自已存在的工具）；或者人直接用 `/agents add` |
 | 一种新的编排模式                             | 实现`agents/orchestration_mode.py` 的 `OrchestrationMode` 接口（`SequentialPipelineOrchestrator`/`DebateOrchestrator` 已经是留好的真实占位） |
 
 ## 路标
@@ -205,7 +211,7 @@ sequenceDiagram
 | D    | Multi-Agent 基础设施 + Leader-Worker 编排（进程内，`worker-as-tool` 模式，并发工具派发） | ✅ 已完成      |
 | F    | 对话式 Skill 自我扩展（`propose_new_skill` + 人工代码审批 + 热加载）                     | ✅ 已完成      |
 | H    | 自我扩展二期（`propose_new_agent` + `propose_mcp_server`）+ 三者共用的持久化写回基础设施  | ✅ 已完成      |
-| I    | 人工直连 CLI 命令层：`/help` `/config` `/agents` `/skills`（配置 API、管理团队、加载外部 Skill） | 进行中         |
+| I    | 人工直连 CLI 命令层：`/help` `/config` `/agents` `/skills`（配置 API、管理团队、加载外部 Skill） | ✅ 已完成      |
 | J    | 用户画像：结构化、自动注入 system prompt 的用户画像（区别于按需检索的 `remember_fact`）  | 计划中         |
 | G    | PM 能力团队扩编：`user_researcher`/`analyst` 新 Agent + `make_docx`/`make_html_report` + 报告输出沙箱加固 | 暂缓，未来路标 |
 | E    | 其他编排模式、FastAPI 封装、Google Calendar OAuth、A2A 协议对外互通                        | 更远期，仅占位 |
