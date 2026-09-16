@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     notes_sandbox_root: Path = PROJECT_ROOT / "sandbox" / "notes"
     calendar_events_file: Path = PROJECT_ROOT / "sandbox" / "calendar" / "events.json"
     tasks_file: Path = PROJECT_ROOT / "sandbox" / "tasks" / "tasks.json"
+    memory_file: Path = PROJECT_ROOT / "sandbox" / "memory" / "facts.json"
     logs_dir: Path = PROJECT_ROOT / "logs"
     skills_dir: Path = PROJECT_ROOT / "skills_store"
     mcp_config_path: Path = PROJECT_ROOT / "config" / "mcp_servers.json"

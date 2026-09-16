@@ -23,3 +23,9 @@ class TerminalConfirmationChannel(ConfirmationChannel):
             return answer == "y"
 
         return await asyncio.to_thread(_prompt)
+
+    async def ask_open_question(self, prompt: str) -> str:
+        def _prompt() -> str:
+            return input(f"\n[QUESTION] {prompt}\n> ").strip()
+
+        return await asyncio.to_thread(_prompt)

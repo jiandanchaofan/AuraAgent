@@ -26,12 +26,18 @@ class FakeLLMProvider:
 
 
 class FakeConfirmationChannel:
-    """Always returns a fixed decision; records every request it saw."""
+    """Always returns a fixed decision/answer; records every request it saw."""
 
-    def __init__(self, decision: bool) -> None:
+    def __init__(self, decision: bool = True, answer: str = "") -> None:
         self.decision = decision
+        self.answer = answer
         self.requests: list[object] = []
+        self.questions_asked: list[str] = []
 
     async def confirm(self, request) -> bool:
         self.requests.append(request)
         return self.decision
+
+    async def ask_open_question(self, prompt: str) -> str:
+        self.questions_asked.append(prompt)
+        return self.answer

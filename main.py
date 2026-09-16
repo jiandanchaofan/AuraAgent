@@ -23,6 +23,9 @@ from providers.openai_provider import OpenAIProvider
 from tools.calc.calculate_tool import register_calculate_tools
 from tools.calendar.calendar_tool import register_calendar_tools
 from tools.calendar.local_json_calendar import LocalJSONCalendarProvider
+from tools.human.ask_human_tool import register_ask_human_tools
+from tools.memory.memory_store import MemoryStore
+from tools.memory.memory_tool import register_memory_tools
 from tools.notes.notes_tool import register_notes_tools
 from tools.registry import ToolRegistry
 from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
@@ -37,7 +40,20 @@ SYSTEM_PROMPT = (
     "information or an action you can't provide from your own knowledge. "
     "Deleting a task, or deleting/modifying an important calendar event, "
     "may pause to ask the user for confirmation — if declined, treat it "
-    "as a normal outcome and report it back plainly."
+    "as a normal outcome and report it back plainly.\n\n"
+    "You have long-term memory tools: remember_fact and recall_facts. Facts "
+    "you save are NOT shown to you automatically — you must call "
+    "recall_facts yourself, especially before telling the user you don't "
+    "know a preference, prior decision, or detail they may have told you in "
+    "an earlier session. Call remember_fact only for durable, reusable "
+    "information (stated preferences, standing facts, decisions) — not for "
+    "one-off task details already captured via notes, tasks, or calendar. "
+    "Do not call recall_facts reflexively on every turn; only when it's "
+    "plausibly relevant.\n\n"
+    "You also have ask_human, which pauses and asks the user an open-ended "
+    "question. Use it only when proceeding without clarification risks an "
+    "incorrect or unsafe action; prefer recall_facts, search_notes, or a "
+    "clearly-stated reasonable assumption over asking."
 )
 
 
@@ -53,6 +69,10 @@ async def main() -> None:
 
     task_provider = LocalJSONTaskProvider(settings.tasks_file)
     register_task_tools(registry, task_provider, confirmation_channel)
+
+    memory_store = MemoryStore(settings.memory_file)
+    register_memory_tools(registry, memory_store)
+    register_ask_human_tools(registry, confirmation_channel)
 
     register_calculate_tools(registry)
     http_client = build_default_http_client()

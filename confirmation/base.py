@@ -28,3 +28,13 @@ class ConfirmationChannel(ABC):
     async def confirm(self, request: ConfirmationRequest) -> bool:
         """Return True to proceed, False to abort the tool call."""
         ...
+
+    @abstractmethod
+    async def ask_open_question(self, prompt: str) -> str:
+        """Pause and ask the human a free-text clarifying question, returning
+        their answer verbatim (empty string if they gave none). This is the
+        same physical channel as confirm() — one object represents "pause
+        and talk to the human" — just a different response shape (free text
+        instead of yes/no), which is why this lives on the same ABC rather
+        than a parallel interface."""
+        ...

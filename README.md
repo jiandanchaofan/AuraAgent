@@ -10,6 +10,8 @@
 - **本地 JSON 日历 + Human-in-the-loop 确认**（`tools/calendar/`, `confirmation/`）：`list_calendar_events` / `create_calendar_event` / `update_calendar_event` / `delete_calendar_event`，事件持久化在 `sandbox/calendar/events.json`。删除操作、以及对标记为 `important` 事件的修改，都会通过终端 Y/N 交互确认后才执行；用户拒绝时返回普通 Observation 而不是抛异常。
 - **任务清单工具**（`tools/tasks/`）：`create_task` / `list_tasks` / `complete_task` / `delete_task`，持久化模式和日历完全一致（`sandbox/tasks/tasks.json`）；`delete_task` 复用日历那一个 `confirmation_channel` 实例，同样走终端确认。
 - **安全计算 + 网页抓取工具**（`tools/calc/`, `tools/web/`）：`calculate`（基于 `ast` 白名单手写解释器求值数学表达式，不用 `eval`/`exec`，抗对抗性输入）、`fetch_url`（httpx 异步抓取网页转纯文本，scheme 白名单 + 超时 + 大小截断；已知局限：不做 SSRF IP 段过滤，也无法绕过需要 JS 执行的反爬挑战页）。
+- **跨会话记忆工具**（`tools/memory/`）：`remember_fact` / `recall_facts`，持久化在 `sandbox/memory/facts.json`。拉取式设计——记忆内容不自动注入 system prompt，模型需要主动调用才能读到，避免随记忆条数增长而增加每轮 token 成本。
+- **`ask_human` 工具**（`tools/human/`）：让模型能暂停当前任务、向人类提出开放式问题并等待自由文本回答。复用日历/任务工具已有的 `confirmation_channel` 实例——`ConfirmationChannel` 接口在原来的 `confirm()`（Y/N）基础上加了 `ask_open_question()`（自由文本），同一个物理通道，两种响应形态。
 - **架构占位（下一轮实现）**：MCP 客户端（`mcp_integration/`）、Skill 热加载（`skills/`, `skills_store/`）。这些模块的接口/目录已经搭好，方法体标注 `NotImplementedError` 或 `TODO`。
 
 ## 运行方式
@@ -52,7 +54,7 @@ AuraAgent/
 ├── config/                 # 配置加载 (pydantic-settings)
 ├── core/                   # ReAct 引擎、日志、异常、消息类型（不依赖任何具体实现）
 ├── providers/               # LLMProvider 抽象层 + Anthropic 实现
-├── tools/                  # ToolRegistry + notes/calendar/tasks/calc/web 工具
+├── tools/                  # ToolRegistry + notes/calendar/tasks/calc/web/memory/human 工具
 ├── confirmation/            # Human-in-the-loop 确认通道抽象
 ├── mcp_integration/         # MCP 客户端接入点（占位）
 ├── skills/ skills_store/    # Skill 热加载机制（占位）+ 示例 skill
@@ -61,15 +63,16 @@ AuraAgent/
 └── tests/                  # pytest 单测
 ```
 
-## 下一轮迭代计划
+## 路标
 
-"新增工具"分批计划（详见 `tools/` 下各模块的 docstring；完整技术方案存在本次规划会话的 Claude Code 计划文件里）目前完成到 Batch 2（任务清单工具），暂停在这里，以下两批**先规划好、还未实施**：
+当前是一个更大的路标的一部分（完整技术方案见本次规划会话的 Claude Code 计划文件）：
 
-1. **记忆工具**（`remember_fact` / `recall_facts`）：跨 REPL 会话的长期记忆，拉取式设计（不自动注入 system prompt，避免随记忆条数增长而增加每轮 token 成本），存储在 `sandbox/memory/facts.json`，匹配逻辑跟 `search_notes` 一致（大小写不敏感子串，不引入向量库）。
-2. **`ask_human` 工具**：把现有 `ConfirmationChannel`（目前只能 Y/N）泛化成也能问开放式问题——计划是在 `ConfirmationChannel` 上加一个 `ask_open_question(prompt) -> str` 抽象方法，而不是新建平行接口，复用同一个已注入的 confirmation 通道实例。
+| Epic | 内容 | 状态 |
+|---|---|---|
+| A | 记忆工具 + `ask_human` | ✅ 已完成 |
+| B | MCP `stdio` 客户端真实连接 + 工具动态注册 | 未开始 |
+| C | Skill 热加载真实实现（解析 `SKILL.md`） | 未开始 |
+| D | Multi-Agent 基础设施 + Leader-Worker 编排（进程内，`worker-as-tool` 模式，并发工具派发） | 未开始 |
+| E | 其他编排模式、FastAPI 封装、Google Calendar OAuth、A2A 协议对外互通 | 更远期，仅占位 |
 
-再往后：
-
-3. MCP `stdio` 服务器真实连接 + 工具动态注册
-4. Skill 加载器：解析 `SKILL.md` 并注册为可调用工具
-5. （更远期）`GoogleCalendarProvider` OAuth 接入、FastAPI 封装
+Epic D 的关键设计点：Leader/Worker 都是同一个共享 `ToolRegistry` 的 `ScopedToolRegistryView`（按 `capabilities` 过滤 + 强制校验，不只是展示层面），Worker 被包装成 Leader 能调用的普通工具（`delegate_to_<name>`），全程进程内函数调用，不涉及任何网络协议（跟 A2A 这类跨进程/跨厂商协议是完全不同的问题，放在 Epic E）。
