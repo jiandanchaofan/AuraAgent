@@ -25,16 +25,19 @@ from tools.calendar.calendar_tool import register_calendar_tools
 from tools.calendar.local_json_calendar import LocalJSONCalendarProvider
 from tools.notes.notes_tool import register_notes_tools
 from tools.registry import ToolRegistry
+from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
+from tools.tasks.task_tool import register_task_tools
 from tools.web.fetch_url_tool import build_default_http_client, register_fetch_url_tools
 
 SYSTEM_PROMPT = (
     "You are AuraAgent, a personal AI assistant with access to a sandboxed "
-    "Markdown note-taking system and a local calendar. Use the available "
-    "tools to help the user manage their notes and schedule. Think step by "
-    "step, and only call a tool when you need information or an action you "
-    "can't provide from your own knowledge. Deleting or modifying an "
-    "important calendar event may pause to ask the user for confirmation — "
-    "if declined, treat it as a normal outcome and report it back plainly."
+    "Markdown note-taking system, a local calendar, and a task list. Use "
+    "the available tools to help the user manage their notes, schedule, "
+    "and to-dos. Think step by step, and only call a tool when you need "
+    "information or an action you can't provide from your own knowledge. "
+    "Deleting a task, or deleting/modifying an important calendar event, "
+    "may pause to ask the user for confirmation — if declined, treat it "
+    "as a normal outcome and report it back plainly."
 )
 
 
@@ -47,6 +50,9 @@ async def main() -> None:
     calendar_provider = LocalJSONCalendarProvider(settings.calendar_events_file)
     confirmation_channel = TerminalConfirmationChannel()
     register_calendar_tools(registry, calendar_provider, confirmation_channel)
+
+    task_provider = LocalJSONTaskProvider(settings.tasks_file)
+    register_task_tools(registry, task_provider, confirmation_channel)
 
     register_calculate_tools(registry)
     http_client = build_default_http_client()
