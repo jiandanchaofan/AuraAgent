@@ -18,11 +18,11 @@ from tools.registry import ToolRegistry
 
 def register_memory_tools(registry: ToolRegistry, store: MemoryStore) -> None:
     async def remember_fact(args: dict[str, Any]) -> str:
-        fact = store.add_fact(args["content"])
+        fact = await store.add_fact(args["content"])
         return f"Remembered (id={fact.id}): {fact.content}"
 
     async def recall_facts(args: dict[str, Any]) -> str:
-        results = store.search_facts(args.get("query", ""))
+        results = await store.search_facts(args.get("query", ""))
         if not results:
             return "No matching facts found in memory."
         return "\n".join(f"- [{f.id}] {f.content} (remembered {f.created_at})" for f in results)

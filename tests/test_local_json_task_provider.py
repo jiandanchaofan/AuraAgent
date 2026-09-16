@@ -4,6 +4,8 @@ Mirrors tests/test_local_json_calendar.py.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
@@ -72,3 +74,16 @@ async def test_delete_missing_task_raises(tmp_path):
     provider = LocalJSONTaskProvider(tmp_path / "tasks.json")
     with pytest.raises(TaskNotFoundError):
         await provider.delete_task("missing")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_creates_do_not_lose_updates(tmp_path):
+    """Regression test for Multi-Agent concurrent tool dispatch — see the
+    matching test in test_local_json_calendar.py for the full rationale."""
+    provider = LocalJSONTaskProvider(tmp_path / "tasks.json")
+
+    await asyncio.gather(*(provider.create_task(f"Task {i}") for i in range(20)))
+
+    tasks = await provider.list_tasks()
+    assert len(tasks) == 20
+    assert len({t.id for t in tasks}) == 20

@@ -3,6 +3,7 @@ independent of the CalendarTool/HITL layer (see test_calendar_tool.py).
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime
 
 import pytest
@@ -78,3 +79,20 @@ async def test_delete_missing_event_raises_keyerror(tmp_path):
     provider = LocalJSONCalendarProvider(tmp_path / "events.json")
     with pytest.raises(KeyError):
         await provider.delete_event("missing")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_creates_do_not_lose_updates(tmp_path):
+    """Regression test for Multi-Agent concurrent tool dispatch (see
+    core/react_engine.py's asyncio.gather-based dispatch): without the
+    per-instance asyncio.Lock, concurrent create_event() calls could each
+    read the same pre-mutation snapshot and overwrite each other on save."""
+    provider = LocalJSONCalendarProvider(tmp_path / "events.json")
+
+    await asyncio.gather(
+        *(provider.create_event(_event(event_id=f"e{i}", title=f"Event {i}")) for i in range(20))
+    )
+
+    events = await provider.list_events(date(2026, 9, 20), date(2026, 9, 20))
+    assert len(events) == 20
+    assert {e.event_id for e in events} == {f"e{i}" for i in range(20)}
