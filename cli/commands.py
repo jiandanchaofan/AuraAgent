@@ -22,9 +22,6 @@ passed through anything that logs or shows content to the LLM.
 from __future__ import annotations
 
 import getpass
-import re
-import shutil
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -35,17 +32,11 @@ from agents.agent_config_writer import add_agent_entry, add_capability, remove_a
 from agents.agent_definition import AgentDefinition, AgentDefinitionError
 from agents.agent_registry import AgentRegistryError
 from cli.context import CLIContext
-from cli.skill_package import SkillPackageError, extract_skill_files
 from providers.anthropic_provider import AnthropicProvider
 from providers.openai_provider import OpenAIProvider
-from skills.skill_schema import SkillManifestError, parse_skill_manifest
-from tools.self_extend.code_review import scan_for_risky_patterns
+from skills.skill_package import SkillPackageError, extract_skill_files, finalize_skill_install, stage_skill_install
 
 _ENV_KEY_BY_PROVIDER = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
-# Same identifier rule propose_new_skill (tools/self_extend/propose_skill_tool.py)
-# enforces for a skill name — defined locally rather than imported since
-# it's a small, independent rule each self-extension surface owns.
-_SKILL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _HELP_TEXT = """\
 Available commands:
@@ -268,55 +259,31 @@ async def _skills_install(local_path: str, ctx: CLIContext) -> None:
 async def _install_skill_package(data: bytes, ctx: CLIContext) -> None:
     try:
         skill_md_text, run_py_text = extract_skill_files(data)
+        staged = stage_skill_install(skill_md_text, run_py_text, ctx.settings.skills_dir, ctx.registry)
     except SkillPackageError as exc:
         print(f"Rejected: {exc}")
         return
+    except Exception as exc:  # noqa: BLE001 - a bad manifest, surfaced plainly
+        print(f"Invalid skill package: {exc}")
+        return
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        (tmp_path / "SKILL.md").write_text(skill_md_text, encoding="utf-8")
-        (tmp_path / "run.py").write_text(run_py_text, encoding="utf-8")
-        try:
-            manifest = parse_skill_manifest(tmp_path)
-        except SkillManifestError as exc:
-            print(f"Invalid skill package: {exc}")
-            return
-        if not _SKILL_NAME_PATTERN.match(manifest.name):
-            print(f"Invalid skill name '{manifest.name}' in SKILL.md.")
-            return
-
-        skill_dir = ctx.settings.skills_dir / manifest.name
-        if skill_dir.exists():
-            print(f"A skill named '{manifest.name}' already exists.")
-            return
-        existing_tool_names = {s.name for s in ctx.registry.get_tool_specs()}
-        if manifest.name in existing_tool_names:
-            print(f"Tool name '{manifest.name}' is already registered — rejecting.")
-            return
-
-        warnings = scan_for_risky_patterns(run_py_text)
-        print(f"\n--- SKILL.md ---\n{skill_md_text}")
-        print(f"--- run.py ---\n{run_py_text}\n--- end of code ---")
-        if warnings:
-            print("\nWARNING: static scan found potentially risky patterns — review carefully:")
-            for warning in warnings:
-                print(f"  - {warning}")
-        print(
-            "\nThis code will run on your machine with the SAME PERMISSIONS as AuraAgent itself, "
-            "every time this skill is called, with NO sandbox."
-        )
-        if input("Install this skill? [y/N]: ").strip().lower() != "y":
-            print("Cancelled. No files were written.")
-            return
-
-        skill_dir.mkdir(parents=True)
-        shutil.copy2(tmp_path / "SKILL.md", skill_dir / "SKILL.md")
-        shutil.copy2(tmp_path / "run.py", skill_dir / "run.py")
+    print(f"\n--- SKILL.md ---\n{staged.skill_md_text}")
+    print(f"--- run.py ---\n{staged.run_py_text}\n--- end of code ---")
+    if staged.warnings:
+        print("\nWARNING: static scan found potentially risky patterns — review carefully:")
+        for warning in staged.warnings:
+            print(f"  - {warning}")
+    print(
+        "\nThis code will run on your machine with the SAME PERMISSIONS as AuraAgent itself, "
+        "every time this skill is called, with NO sandbox."
+    )
+    if input("Install this skill? [y/N]: ").strip().lower() != "y":
+        print("Cancelled. No files were written.")
+        return
 
     try:
-        registered_name = ctx.skill_loader.register_one(skill_dir)
-    except (SkillManifestError, ValueError) as exc:
-        shutil.rmtree(skill_dir)
+        registered_name = finalize_skill_install(staged, ctx.skill_loader)
+    except Exception as exc:  # noqa: BLE001 - a registration failure, surfaced plainly
         print(f"Failed to install: {exc}")
         return
 

@@ -55,6 +55,16 @@ class ScopedToolRegistryView:
     def _is_allowed(self, tool_name: str) -> bool:
         return any(fnmatch(tool_name, pattern) for pattern in self._allowed_patterns)
 
+    def is_allowed(self, tool_name: str) -> bool:
+        """Public read of the same check dispatch() enforces — used by
+        find_capability/propose_capability_grant (tools/self_extend/) to
+        tell whether an already-installed tool is already reachable by
+        this agent before proposing to grant it, without duplicating
+        fnmatch logic against a possibly-stale copy of `capabilities`
+        (this reads the view's live, possibly-already-widened patterns,
+        not the static AgentDefinition it was built from)."""
+        return self._is_allowed(tool_name) or tool_name in self._extra_tools
+
     def add_allowed_pattern(self, pattern: str) -> None:
         """Widen this view's own visibility at runtime — used by
         propose_new_skill so the orchestrator can immediately call a skill

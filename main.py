@@ -41,7 +41,10 @@ from tools.notes.notes_tool import register_notes_tools
 from tools.profile.user_profile_store import UserProfileStore
 from tools.profile.user_profile_tool import register_user_profile_tools
 from tools.registry import ToolRegistry
+from tools.self_extend.find_capability_tool import register_find_capability_tool
 from tools.self_extend.propose_agent_tool import register_propose_agent_tool
+from tools.self_extend.propose_capability_grant_tool import register_propose_capability_grant_tool
+from tools.self_extend.propose_external_skill_tool import register_propose_external_skill_tool
 from tools.self_extend.propose_mcp_tool import register_propose_mcp_tool
 from tools.self_extend.propose_skill_tool import register_propose_skill_tool
 from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
@@ -150,6 +153,19 @@ async def main() -> None:
     register_propose_mcp_tool(
         registry, mcp_manager, settings.mcp_config_path, mcp_config_lock, confirmation_channel,
         grant_access=grant_access,
+    )
+
+    # Epic K: autonomous discovery (find_capability, read-only) + two more
+    # gated install paths (tools/self_extend/capability_search.py's module
+    # docstring has the real, verified API shapes). find_capability never
+    # installs anything itself — it just tells the Leader which of these
+    # two (or propose_capability_grant, for something already installed)
+    # to call next, with the details already filled in.
+    register_find_capability_tool(registry, leader_view, http_client, settings.fetch_url_timeout_seconds)
+    register_propose_capability_grant_tool(registry, leader_view, confirmation_channel, grant_access=grant_access)
+    register_propose_external_skill_tool(
+        registry, settings.skills_dir, skill_loader, http_client, settings.fetch_url_timeout_seconds,
+        confirmation_channel, grant_access=grant_access,
     )
 
     # The user profile (tools/profile/) is read ONCE here and spliced

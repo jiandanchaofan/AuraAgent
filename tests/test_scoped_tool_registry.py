@@ -139,6 +139,26 @@ def test_add_extra_tool_does_not_leak_into_a_view_built_without_extra_tools(shar
     assert "delegate_to_analyst" not in {s.name for s in worker_view.get_tool_specs()}
 
 
+def test_is_allowed_reflects_capability_patterns(shared_registry):
+    view = ScopedToolRegistryView(shared_registry, ["*task*"])
+    assert view.is_allowed("create_task") is True
+    assert view.is_allowed("fetch_url") is False
+
+
+def test_is_allowed_reflects_extra_tools(shared_registry):
+    view = ScopedToolRegistryView(
+        shared_registry, ["*task*"], extra_tools={"delegate_to_x": RegisteredTool(spec=_spec("delegate_to_x"), handler=_handler)}
+    )
+    assert view.is_allowed("delegate_to_x") is True
+
+
+def test_is_allowed_reflects_runtime_widening(shared_registry):
+    view = ScopedToolRegistryView(shared_registry, ["*task*"])
+    assert view.is_allowed("fetch_url") is False
+    view.add_allowed_pattern("fetch_url")
+    assert view.is_allowed("fetch_url") is True
+
+
 def test_add_allowed_pattern_does_not_mutate_the_caller_supplied_list(shared_registry):
     """allowed_patterns is typically an AgentDefinition.capabilities list
     (frozen=True dataclass) — add_allowed_pattern must only grow this

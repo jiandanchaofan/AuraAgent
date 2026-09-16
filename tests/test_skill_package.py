@@ -1,6 +1,8 @@
-"""Tests for cli/skill_package.py — safe extraction of externally-sourced
-Skill packages, used by the /skills load and /skills install CLI
-commands. Real zipfile construction, no mocking."""
+"""Tests for skills/skill_package.py's extract_skill_files() — safe
+extraction of externally-sourced Skill packages, used by the /skills load
+and /skills install CLI commands. Real zipfile construction, no mocking.
+See test_skill_package_install.py for stage_skill_install()/
+finalize_skill_install()."""
 from __future__ import annotations
 
 import zipfile
@@ -8,7 +10,7 @@ from io import BytesIO
 
 import pytest
 
-from cli.skill_package import SkillPackageError, extract_skill_files, _MAX_PACKAGE_BYTES
+from skills.skill_package import SkillPackageError, extract_skill_files, _MAX_PACKAGE_BYTES
 
 _SKILL_MD = "---\nname: demo_skill\ndescription: a demo\n---\nbody\n"
 _RUN_PY = "print('hello')\n"
