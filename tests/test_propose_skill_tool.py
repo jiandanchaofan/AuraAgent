@@ -31,8 +31,12 @@ def _setup(tmp_path, decision: bool = True):
     skill_loader = SkillLoader(skills_dir, registry)
     confirmation = FakeConfirmationChannel(decision=decision)
     granted: list[str] = []
+
+    async def grant_access(tool_name: str) -> None:
+        granted.append(tool_name)
+
     register_propose_skill_tool(
-        registry, skill_loader, skills_dir, confirmation, grant_access=granted.append
+        registry, skill_loader, skills_dir, confirmation, grant_access=grant_access
     )
     return registry, skills_dir, confirmation, granted
 
@@ -160,7 +164,11 @@ async def test_registration_failure_after_approval_rolls_back_the_directory(tmp_
 
     confirmation = FakeConfirmationChannel(decision=True)
     granted: list[str] = []
-    register_propose_skill_tool(registry, FailingLoader(), skills_dir, confirmation, grant_access=granted.append)
+
+    async def grant_access(tool_name: str) -> None:
+        granted.append(tool_name)
+
+    register_propose_skill_tool(registry, FailingLoader(), skills_dir, confirmation, grant_access=grant_access)
 
     with pytest.raises(ToolExecutionError):
         await registry.dispatch("propose_new_skill", _valid_args())

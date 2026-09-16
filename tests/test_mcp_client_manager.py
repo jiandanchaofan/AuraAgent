@@ -7,6 +7,7 @@ dependency: example_server.py has zero external requirements beyond the
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -62,6 +63,32 @@ async def test_empty_servers_list_is_a_fast_no_op(tmp_path):
     assert manager.connected_servers == []
     assert registry.get_tool_specs() == []
     await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_connect_one_from_a_different_task_than_close_all_does_not_crash(tmp_path):
+    """Regression test for a real bug found during manual end-to-end
+    verification of propose_mcp_server: core/react_engine.py's concurrent
+    tool dispatch runs each tool call in its OWN asyncio Task (via
+    asyncio.gather), so connect_one() — when reached through that tool
+    call — used to run in a different, short-lived Task than the one that
+    built MCPClientManager and will later call close_all(). anyio's cancel
+    scopes (used internally by stdio_client/ClientSession) require entering
+    and exiting from the exact same Task, so the old implementation raised
+    'Attempted to exit cancel scope in a different task than it was
+    entered in' at shutdown. Reproduced here by explicitly connecting from
+    a spawned asyncio.Task, then calling close_all() from THIS test
+    function's own (different) task."""
+    registry = ToolRegistry()
+    manager = MCPClientManager(tmp_path / "unused.json", registry)
+
+    async def connect_from_another_task():
+        await manager.connect_one({"name": "example", "command": sys.executable, "args": [str(EXAMPLE_SERVER)]})
+
+    await asyncio.create_task(connect_from_another_task())
+
+    assert manager.connected_servers == ["example"]
+    await manager.close_all()  # must not raise
 
 
 @pytest.mark.asyncio

@@ -115,3 +115,55 @@ def test_get_missing_agent_raises(tmp_path):
     registry = AgentRegistry.load(config_path)
     with pytest.raises(AgentRegistryError):
         registry.get("nonexistent")
+
+
+def _minimal_registry() -> AgentRegistry:
+    leader = AgentDefinition(name="orchestrator", role="leader", system_prompt="x", capabilities=["*"])
+    return AgentRegistry([leader])
+
+
+def test_add_worker_appends_to_workers_and_is_gettable():
+    registry = _minimal_registry()
+    new_worker = AgentDefinition(name="analyst", role="worker", system_prompt="y", capabilities=["calculate"])
+
+    registry.add_worker(new_worker)
+
+    assert registry.get("analyst") is new_worker
+    assert new_worker in registry.workers
+
+
+def test_add_worker_rejects_name_collision():
+    registry = _minimal_registry()
+    registry.add_worker(AgentDefinition(name="analyst", role="worker", system_prompt="y", capabilities=["*"]))
+
+    with pytest.raises(AgentRegistryError):
+        registry.add_worker(AgentDefinition(name="analyst", role="worker", system_prompt="z", capabilities=["*"]))
+
+
+def test_add_worker_rejects_leader_role():
+    registry = _minimal_registry()
+    with pytest.raises(AgentRegistryError):
+        registry.add_worker(AgentDefinition(name="second_leader", role="leader", system_prompt="y", capabilities=["*"]))
+
+
+def test_remove_worker_removes_the_named_worker():
+    registry = _minimal_registry()
+    registry.add_worker(AgentDefinition(name="analyst", role="worker", system_prompt="y", capabilities=["*"]))
+
+    registry.remove_worker("analyst")
+
+    assert registry.workers == []
+    with pytest.raises(AgentRegistryError):
+        registry.get("analyst")
+
+
+def test_remove_worker_rejects_removing_the_leader():
+    registry = _minimal_registry()
+    with pytest.raises(AgentRegistryError):
+        registry.remove_worker("orchestrator")
+
+
+def test_remove_worker_rejects_unknown_name():
+    registry = _minimal_registry()
+    with pytest.raises(AgentRegistryError):
+        registry.remove_worker("nonexistent")

@@ -109,6 +109,36 @@ async def test_add_allowed_pattern_widens_visibility_and_dispatch_immediately(sh
     assert await view.dispatch("fetch_url", {}) == "ok"
 
 
+@pytest.mark.asyncio
+async def test_add_extra_tool_makes_it_visible_and_dispatchable_immediately(shared_registry):
+    """Backs propose_new_agent's hot-reload flow: a freshly approved
+    Agent's delegate_to_<name> tool must become callable in the SAME turn
+    it was approved, without needing to have been predicted ahead of time
+    (same immediacy guarantee add_allowed_pattern already gives skills)."""
+    view = ScopedToolRegistryView(shared_registry, ["*task*"])
+    assert "delegate_to_analyst" not in {s.name for s in view.get_tool_specs()}
+
+    async def delegate_handler(args):
+        return f"delegated: {args['task']}"
+
+    view.add_extra_tool(RegisteredTool(spec=_spec("delegate_to_analyst"), handler=delegate_handler))
+
+    assert "delegate_to_analyst" in {s.name for s in view.get_tool_specs()}
+    assert await view.dispatch("delegate_to_analyst", {"task": "summarize"}) == "delegated: summarize"
+
+
+def test_add_extra_tool_does_not_leak_into_a_view_built_without_extra_tools(shared_registry):
+    """Two independently-built views (e.g. a Worker's own view, which is
+    always built with extra_tools=None) must not share extra_tools state —
+    each view owns its own dict."""
+    leader_view = ScopedToolRegistryView(shared_registry, ["*"])
+    worker_view = ScopedToolRegistryView(shared_registry, ["*"])
+
+    leader_view.add_extra_tool(RegisteredTool(spec=_spec("delegate_to_analyst"), handler=_handler))
+
+    assert "delegate_to_analyst" not in {s.name for s in worker_view.get_tool_specs()}
+
+
 def test_add_allowed_pattern_does_not_mutate_the_caller_supplied_list(shared_registry):
     """allowed_patterns is typically an AgentDefinition.capabilities list
     (frozen=True dataclass) — add_allowed_pattern must only grow this

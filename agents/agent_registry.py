@@ -66,3 +66,29 @@ class AgentRegistry:
             return self._agents[name]
         except KeyError as exc:
             raise AgentRegistryError(f"No agent named '{name}' in the registry") from exc
+
+    def add_worker(self, agent: AgentDefinition) -> None:
+        """Register a new worker at runtime — used by propose_new_agent
+        (and, later, the /agents add CLI command) once a proposal is
+        approved, so this in-memory roster stays consistent with the
+        engines/tools main.py already built for it. Raises rather than
+        silently overwriting on a name collision — callers are expected to
+        have already checked this (propose_new_agent does, as a
+        pre-approval structural check)."""
+        if agent.role != "worker":
+            raise AgentRegistryError("add_worker() only accepts role='worker' — the leader is fixed at load time")
+        if agent.name in self._agents:
+            raise AgentRegistryError(f"Agent '{agent.name}' already exists")
+        self._agents[agent.name] = agent
+        self.workers.append(agent)
+
+    def remove_worker(self, name: str) -> None:
+        """Remove a worker at runtime — used by the /agents remove CLI
+        command. The leader can never be removed (a team with no leader
+        breaks the "exactly one leader" invariant load() enforces)."""
+        if name == self.leader.name:
+            raise AgentRegistryError("Cannot remove the leader agent")
+        if name not in self._agents:
+            raise AgentRegistryError(f"No agent named '{name}' in the registry")
+        del self._agents[name]
+        self.workers = [w for w in self.workers if w.name != name]

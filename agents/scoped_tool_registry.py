@@ -65,6 +65,17 @@ class ScopedToolRegistryView:
         takes effect immediately."""
         self._allowed_patterns.append(pattern)
 
+    def add_extra_tool(self, tool: RegisteredTool) -> None:
+        """Add a synthetic, view-local tool at runtime — the propose_new_agent
+        counterpart to add_allowed_pattern(): a freshly approved Agent's
+        delegate_to_<name> tool must appear in the Leader's OWN view, not
+        the shared ToolRegistry (delegate tools never touch it, see the
+        module docstring), so widening `_allowed_patterns` alone would not
+        make it callable. get_tool_specs()/dispatch() both re-read
+        `_extra_tools` fresh on every call, so this takes effect
+        immediately, same as add_allowed_pattern()."""
+        self._extra_tools[tool.spec.name] = tool
+
     def get_tool_specs(self) -> list[ToolSpec]:
         visible = [spec for spec in self._underlying.get_tool_specs() if self._is_allowed(spec.name)]
         visible.extend(entry.spec for entry in self._extra_tools.values())

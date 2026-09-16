@@ -18,7 +18,7 @@ import ast
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 import yaml
 
@@ -38,13 +38,16 @@ def register_propose_skill_tool(
     skill_loader: SkillLoader,
     skills_dir: Path,
     confirmation_channel: ConfirmationChannel,
-    grant_access: Callable[[str], None],
+    grant_access: Callable[[str], Awaitable[None]],
 ) -> None:
-    """`grant_access(tool_name)` is called after a successful install —
-    normally the caller's own ScopedToolRegistryView.add_allowed_pattern,
-    so the agent that proposed the skill can immediately call it without
-    needing to have predicted its name in config/agents.json ahead of time.
-    """
+    """`grant_access(tool_name)` is awaited after a successful install — it
+    both widens the caller's own ScopedToolRegistryView.add_allowed_pattern
+    (so the agent that proposed the skill can immediately call it without
+    needing to have predicted its name in config/agents.json ahead of time)
+    AND persists the same capability grant to config/agents.json via
+    agents/agent_config_writer.add_capability(), so it survives a restart
+    too — see agents/agent_config_writer.py's module docstring for why this
+    persistence step was missing originally and had to be added."""
 
     async def propose_new_skill(args: dict[str, Any]) -> str:
         name = args["name"]
@@ -97,7 +100,7 @@ def register_propose_skill_tool(
             shutil.rmtree(skill_dir)
             raise ToolExecutionError(f"Generated skill failed to install and was not saved: {exc}") from exc
 
-        grant_access(registered_name)
+        await grant_access(registered_name)
         return (
             f"Installed and loaded new skill '{registered_name}'. It is now available as a tool "
             "for the rest of this session, and persists on disk for future sessions too."

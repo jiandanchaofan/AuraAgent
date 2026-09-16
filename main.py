@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 
+from agents.agent_config_writer import add_capability
 from agents.agent_registry import AgentRegistry
 from agents.delegate_tool import build_delegate_tool
 from agents.leader_worker_orchestrator import LeaderWorkerOrchestrator
@@ -35,6 +36,8 @@ from tools.memory.memory_store import MemoryStore
 from tools.memory.memory_tool import register_memory_tools
 from tools.notes.notes_tool import register_notes_tools
 from tools.registry import ToolRegistry
+from tools.self_extend.propose_agent_tool import register_propose_agent_tool
+from tools.self_extend.propose_mcp_tool import register_propose_mcp_tool
 from tools.self_extend.propose_skill_tool import register_propose_skill_tool
 from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
 from tools.tasks.task_tool import register_task_tools
@@ -105,16 +108,34 @@ async def main() -> None:
     leader = agent_registry.leader
     leader_view = ScopedToolRegistryView(registry, leader.capabilities, extra_tools=leader_extra_tools)
 
-    # propose_new_skill is Leader-only self-extension (see
-    # tools/self_extend/propose_skill_tool.py) — registered into the
+    # propose_new_skill/propose_new_agent/propose_mcp_server are Leader-only
+    # self-extension tools (see tools/self_extend/) — registered into the
     # shared registry like any native tool (visibility still governed by
-    # `capabilities` in config/agents.json), but it also needs a way to
-    # widen the Leader's OWN view once it installs something new, since a
-    # freshly created skill's name can't have been predicted by the
-    # static capabilities list ahead of time.
+    # `capabilities` in config/agents.json). Each needs a way to widen the
+    # Leader's OWN view once it installs something new, since a freshly
+    # granted capability's name can't have been predicted by the static
+    # capabilities list ahead of time — grant_access does that AND persists
+    # the same grant to config/agents.json (agents/agent_config_writer.py),
+    # so it survives a restart too, closing the gap the original
+    # make_pptx-adoption investigation found (see that module's docstring).
+    agents_config_lock = asyncio.Lock()
+    mcp_config_lock = asyncio.Lock()
+
+    async def grant_access(pattern: str) -> None:
+        leader_view.add_allowed_pattern(pattern)
+        await add_capability(settings.agents_config_path, leader.name, pattern, agents_config_lock)
+
     register_propose_skill_tool(
         registry, skill_loader, settings.skills_dir, confirmation_channel,
-        grant_access=leader_view.add_allowed_pattern,
+        grant_access=grant_access,
+    )
+    register_propose_agent_tool(
+        registry, agent_registry, leader_view, provider, logger, settings.max_turns,
+        settings.agents_config_path, agents_config_lock, confirmation_channel,
+    )
+    register_propose_mcp_tool(
+        registry, mcp_manager, settings.mcp_config_path, mcp_config_lock, confirmation_channel,
+        grant_access=grant_access,
     )
 
     leader_engine = AsyncReActEngine(
