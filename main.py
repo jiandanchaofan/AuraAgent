@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import asyncio
 
-import httpx
-
 from config.settings import load_settings
 from confirmation.terminal_channel import TerminalConfirmationChannel
 from core.logger import AuraLogger, print_banner
@@ -27,7 +25,7 @@ from tools.calendar.calendar_tool import register_calendar_tools
 from tools.calendar.local_json_calendar import LocalJSONCalendarProvider
 from tools.notes.notes_tool import register_notes_tools
 from tools.registry import ToolRegistry
-from tools.web.fetch_url_tool import register_fetch_url_tools
+from tools.web.fetch_url_tool import build_default_http_client, register_fetch_url_tools
 
 SYSTEM_PROMPT = (
     "You are AuraAgent, a personal AI assistant with access to a sandboxed "
@@ -51,7 +49,7 @@ async def main() -> None:
     register_calendar_tools(registry, calendar_provider, confirmation_channel)
 
     register_calculate_tools(registry)
-    http_client = httpx.AsyncClient()
+    http_client = build_default_http_client()
     register_fetch_url_tools(
         registry, http_client, settings.fetch_url_timeout_seconds, settings.fetch_url_max_bytes
     )

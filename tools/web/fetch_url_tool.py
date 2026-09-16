@@ -23,6 +23,33 @@ from tools.web.html_to_text import html_to_text
 
 _ALLOWED_SCHEMES = {"http", "https"}
 
+# Some sites' bot-detection/WAF layers (observed against a real Hostinger
+# "hcdn"-fronted site) return 403 for httpx's bare default request even
+# though the page is a normal public page reachable in any browser or via
+# curl — almost certainly fingerprinting request-header presence/order
+# rather than anything httpx does wrong. Sending the same baseline headers
+# curl/browsers send by default (nothing deceptive, just not omitting
+# them) is enough to pass that check. This does NOT help against sites
+# using a JS-execution challenge (e.g. a "checking your browser" meta-
+# refresh interstitial) — that requires an actual browser engine, which
+# this project deliberately does not depend on.
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def build_default_http_client() -> httpx.AsyncClient:
+    """Real-network client for main.py's composition root. Tests should
+    keep constructing their own httpx.AsyncClient(transport=MockTransport(...))
+    directly rather than using this — it's only about looking like an
+    ordinary browser request on the wire, not about test behavior."""
+    return httpx.AsyncClient(headers=DEFAULT_HEADERS)
+
 
 def register_fetch_url_tools(
     registry: ToolRegistry,
