@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     logs_dir: Path = PROJECT_ROOT / "logs"
     skills_dir: Path = PROJECT_ROOT / "skills_store"
     mcp_config_path: Path = PROJECT_ROOT / "config" / "mcp_servers.json"
+    agents_config_path: Path = PROJECT_ROOT / "config" / "agents.json"
 
 
 def load_settings() -> Settings:

@@ -13,15 +13,20 @@ from __future__ import annotations
 
 import asyncio
 
+from agents.agent_registry import AgentRegistry
+from agents.delegate_tool import build_delegate_tool
+from agents.leader_worker_orchestrator import LeaderWorkerOrchestrator
+from agents.scoped_tool_registry import ScopedToolRegistryView
 from config.settings import load_settings
 from confirmation.terminal_channel import TerminalConfirmationChannel
 from core.logger import AuraLogger, print_banner
 from core.react_engine import AsyncReActEngine
 from mcp_integration.mcp_client_manager import MCPClientManager
 from providers.anthropic_provider import AnthropicProvider
-from skills.skill_loader import SkillLoader
 from providers.base import LLMProvider
 from providers.openai_provider import OpenAIProvider
+from skills.skill_loader import SkillLoader
+from tools.base import RegisteredTool
 from tools.calc.calculate_tool import register_calculate_tools
 from tools.calendar.calendar_tool import register_calendar_tools
 from tools.calendar.local_json_calendar import LocalJSONCalendarProvider
@@ -33,30 +38,6 @@ from tools.registry import ToolRegistry
 from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
 from tools.tasks.task_tool import register_task_tools
 from tools.web.fetch_url_tool import build_default_http_client, register_fetch_url_tools
-
-SYSTEM_PROMPT = (
-    "You are AuraAgent, a personal AI assistant with access to a sandboxed "
-    "Markdown note-taking system, a local calendar, and a task list. Use "
-    "the available tools to help the user manage their notes, schedule, "
-    "and to-dos. Think step by step, and only call a tool when you need "
-    "information or an action you can't provide from your own knowledge. "
-    "Deleting a task, or deleting/modifying an important calendar event, "
-    "may pause to ask the user for confirmation — if declined, treat it "
-    "as a normal outcome and report it back plainly.\n\n"
-    "You have long-term memory tools: remember_fact and recall_facts. Facts "
-    "you save are NOT shown to you automatically — you must call "
-    "recall_facts yourself, especially before telling the user you don't "
-    "know a preference, prior decision, or detail they may have told you in "
-    "an earlier session. Call remember_fact only for durable, reusable "
-    "information (stated preferences, standing facts, decisions) — not for "
-    "one-off task details already captured via notes, tasks, or calendar. "
-    "Do not call recall_facts reflexively on every turn; only when it's "
-    "plausibly relevant.\n\n"
-    "You also have ask_human, which pauses and asks the user an open-ended "
-    "question. Use it only when proceeding without clarification risks an "
-    "incorrect or unsafe action; prefer recall_facts, search_notes, or a "
-    "clearly-stated reasonable assumption over asking."
-)
 
 
 async def main() -> None:
@@ -95,13 +76,41 @@ async def main() -> None:
     else:
         provider = AnthropicProvider(api_key=settings.anthropic_api_key, model=settings.model_id)
     logger = AuraLogger(settings.logs_dir)
-    engine = AsyncReActEngine(
+
+    # Multi-Agent composition: one shared ToolRegistry (built above) feeds a
+    # ScopedToolRegistryView per agent (filtered by that agent's
+    # `capabilities` from config/agents.json). Each Worker's AsyncReActEngine
+    # is built once here and wrapped into a delegate_to_<name> tool that
+    # exists ONLY in the Leader's own view — see agents/delegate_tool.py and
+    # agents/scoped_tool_registry.py for why this keeps core/react_engine.py
+    # completely unaware that Multi-Agent orchestration exists at all.
+    agent_registry = AgentRegistry.load(settings.agents_config_path)
+
+    leader_extra_tools: dict[str, RegisteredTool] = {}
+    for worker in agent_registry.workers:
+        worker_view = ScopedToolRegistryView(registry, worker.capabilities)
+        worker_engine = AsyncReActEngine(
+            provider=provider,
+            registry=worker_view,
+            logger=logger,
+            system_prompt=worker.system_prompt,
+            max_turns=settings.max_turns,
+            agent_name=worker.name,
+        )
+        delegate_tool = build_delegate_tool(worker, worker_engine)
+        leader_extra_tools[delegate_tool.spec.name] = delegate_tool
+
+    leader = agent_registry.leader
+    leader_view = ScopedToolRegistryView(registry, leader.capabilities, extra_tools=leader_extra_tools)
+    leader_engine = AsyncReActEngine(
         provider=provider,
-        registry=registry,
+        registry=leader_view,
         logger=logger,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=leader.system_prompt,
         max_turns=settings.max_turns,
+        agent_name=leader.name,
     )
+    orchestrator = LeaderWorkerOrchestrator(leader_engine)
 
     print_banner(f"AuraAgent, developed by James Jiang | provider={settings.llm_provider} model={settings.model_id} | type 'exit' to quit")
     try:
@@ -116,7 +125,7 @@ async def main() -> None:
             if user_input.lower() in {"exit", "quit"}:
                 break
             try:
-                await engine.run(user_input)
+                await orchestrator.run(user_input)
             except Exception as exc:  # noqa: BLE001 - keep the REPL alive on unexpected errors
                 print(f"[ERROR] {type(exc).__name__}: {exc}")
     finally:
