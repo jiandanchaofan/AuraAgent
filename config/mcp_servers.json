@@ -1,3 +1,9 @@
 {
-  "servers": []
+  "servers": [
+    {
+      "name": "example",
+      "command": "python",
+      "args": ["mcp_servers/example_server.py"]
+    }
+  ]
 }

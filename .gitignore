@@ -8,6 +8,10 @@ sandbox/notes/*
 !sandbox/notes/.gitkeep
 sandbox/calendar/*
 !sandbox/calendar/.gitkeep
+sandbox/tasks/*
+!sandbox/tasks/.gitkeep
+sandbox/memory/*
+!sandbox/memory/.gitkeep
 
 logs/*
 !logs/.gitkeep

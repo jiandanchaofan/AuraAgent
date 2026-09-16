@@ -17,6 +17,7 @@ from config.settings import load_settings
 from confirmation.terminal_channel import TerminalConfirmationChannel
 from core.logger import AuraLogger, print_banner
 from core.react_engine import AsyncReActEngine
+from mcp_integration.mcp_client_manager import MCPClientManager
 from providers.anthropic_provider import AnthropicProvider
 from providers.base import LLMProvider
 from providers.openai_provider import OpenAIProvider
@@ -79,8 +80,11 @@ async def main() -> None:
     register_fetch_url_tools(
         registry, http_client, settings.fetch_url_timeout_seconds, settings.fetch_url_max_bytes
     )
-    # MCP / Skill registration land in a later iteration — see
-    # mcp_integration/ and skills/ for their scaffolded seams.
+
+    mcp_manager = MCPClientManager(settings.mcp_config_path, registry)
+    await mcp_manager.connect_all()
+    # Skill registration lands in a later iteration — see skills/ for its
+    # scaffolded seam.
 
     provider: LLMProvider
     if settings.llm_provider == "openai":
@@ -116,6 +120,7 @@ async def main() -> None:
                 print(f"[ERROR] {type(exc).__name__}: {exc}")
     finally:
         await http_client.aclose()
+        await mcp_manager.close_all()
 
 
 if __name__ == "__main__":
