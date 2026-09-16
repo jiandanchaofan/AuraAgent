@@ -107,8 +107,10 @@ graph TD
 
     Main -->|构造| Engine["AsyncReActEngine<br/>core/react_engine.py"]
     Main -->|构造| AgentReg["AgentRegistry<br/>解析 config/agents.json"]
+    Main -->|启动时读一次, 拼进 system prompt| Profile["UserProfileStore<br/>tools/profile/"]
 
-    Engine -->|只依赖抽象| LLMProvider["LLMProvider 接口"]
+    Engine -->|只依赖抽象| SwapProvider["SwappableProvider<br/>providers/swappable_provider.py"]
+    SwapProvider -.转发到当前持有的.-> LLMProvider["LLMProvider 接口"]
     LLMProvider -.两个实现.-> Anthropic["AnthropicProvider"]
     LLMProvider -.两个实现.-> OpenAI["OpenAIProvider（也服务 DeepSeek）"]
 
@@ -121,11 +123,34 @@ graph TD
     SelfExtend["propose_new_skill / propose_new_agent<br/>propose_mcp_server<br/>tools/self_extend/"] -->|运行时热 register| Registry
     SelfExtend -->|持久化写回| ConfigFiles["config/agents.json<br/>config/mcp_servers.json"]
 
+    CLI["cli/commands.py<br/>人工直连 '/' 命令"] -.完全绕过.-> Engine
+    CLI -->|同一套构造/持久化助手| ConfigFiles
+    CLI -->|直接调用| ToolView
+
     Native -.高风险操作走.-> Confirmation["ConfirmationChannel<br/>HITL 抽象"]
     SelfExtend -.三档风险审查走.-> Confirmation
 ```
 
-核心信息：**引擎在最中间，只认接口；三种工具来源 + 一种运行时自我扩展机制，最终都汇流到同一个 `ToolRegistry`**。这个"汇流"设计是整个架构能长期扩展而不腐化的关键——`core/react_engine.py` 从第一行代码到现在，签名和职责完全没变过。
+核心信息：**引擎在最中间，只认接口；四种工具来源（原生/MCP/Skill/自我扩展）最终都汇流到同一个 `ToolRegistry`，而 CLI 命令层是唯一一条不经过引擎的旁路通道**。这个"汇流"设计是整个架构能长期扩展而不腐化的关键——`core/react_engine.py` 从第一行代码到现在，签名和职责完全没变过。
+
+### 各功能模块架构
+
+上面的分层图是"一张图看全局"，这里按目录逐个模块说明内部结构和设计要点——`v1 范围`一节说的是"这个模块能做什么"，这里说的是"这个模块内部长什么样、为什么这么分"。
+
+| 模块 | 关键文件 | 架构要点 |
+| --- | --- | --- |
+| **`core/`**（引擎核心） | `react_engine.py`、`message_types.py`、`logger.py`、`exceptions.py` | 全项目唯一"引擎"，不 import 任何具体实现，只认 `LLMProvider`/`ToolRegistry` 的接口形状（鸭子类型，`ScopedToolRegistryView` 结构上满足即可，不需要共同基类）。`AsyncReActEngine` 本身几乎无状态——`run()` 的 `history` 是每次调用全新的局部变量——所以同一个引擎实例能被多个并发的 `delegate_to_<worker>` 调用安全复用。 |
+| **`providers/`**（LLM 抽象层） | `base.py`（`LLMProvider` ABC）、`anthropic_provider.py`、`openai_provider.py`、`swappable_provider.py` | 每个具体 provider 独立负责把 provider-neutral 的 `ConversationTurn`/`ToolSpec` 翻译成自己厂商的 wire format（`tool_use` block vs `tool_calls`），互不感知对方存在。`SwappableProvider` 是后加的一层间接——`main.py` 只构造一个实例，所有引擎（Leader/Worker/未来新建的 Worker）共享它，`/config use` 换的是这一个对象内部指向的具体 provider。 |
+| **`agents/`**（Multi-Agent 编排） | `agent_definition.py`/`agent_registry.py`、`scoped_tool_registry.py`、`delegate_tool.py`、`agent_builder.py`、`agent_config_writer.py`、`leader_worker_orchestrator.py`/`orchestration_mode.py` | 声明式配置（`AgentRegistry.load()`）与运行时可变状态（`add_worker`/`remove_worker`）分离；`ScopedToolRegistryView` 同时是展示层和强制层；`agent_builder.py` 把"构造 Worker 引擎 + 包装成 delegate 工具"这一整套逻辑抽成一个函数，`propose_new_agent` 和 `/agents add` 两条触发路径共用，不会各写一份、行为慢慢分叉。 |
+| **`tools/registry.py`**（共享工具注册表） | `ToolRegistry` 类 | 全架构唯一的汇流点：`register()`/`get_tool_specs()`/`dispatch()` 三个方法，原生工具、MCP 工具、Skill、自我扩展新建的工具全部走同一套调用，注册进去之后彼此不可区分——`ScopedToolRegistryView` 的过滤逻辑也因此完全不需要知道一个工具"来自哪里"。 |
+| **`tools/self_extend/`**（三档自我扩展） | `propose_skill_tool.py`/`propose_agent_tool.py`/`propose_mcp_tool.py`、`code_review.py` | 三个工具共享同一个形状：结构性预检查（不打扰人）→ 完整内容交给人工审批（`ConfirmationChannel.confirm()`）→ 批准后热注册 + 持久化。风险分三档（`code_execution` < `scope_expansion` < `arbitrary_execution`），审批文案的措辞强度随档位递增，而不是一刀切。`code_review.py` 是纯正则的"提醒式"静态扫描，不是沙箱。 |
+| **`cli/`**（人工直连命令层） | `commands.py`（`dispatch_command` 主分发）、`context.py`（`CLIContext` 依赖打包）、`skill_package.py`（外部 Skill 包校验） | 跟 `tools/self_extend/` 并列的第二条触发通道，服务同一批底层能力（新增/移除 Agent、安装 Skill），复用完全相同的 `agents/agent_builder.py`/`agent_config_writer.py` 等助手，但触发者是人不是 LLM，所以跳过"审批"这一步（人已经是审批者），命令解析用 `partition`（不是 `shlex`）避免 Windows 路径里的反斜杠被当成转义符吞掉。 |
+| **`confirmation/`**（HITL 抽象） | `base.py`（`ConfirmationChannel` 接口）、`terminal_channel.py`（终端实现） | `confirm()`（Y/N）+ `ask_open_question()`（自由文本）共享同一个物理通道，`asyncio.to_thread` 包裹阻塞的 `input()` 避免卡住事件循环；引擎完全不 import 这个模块，只有具体工具的 handler 会用。 |
+| **`mcp_integration/`**（MCP 客户端） | `mcp_client_manager.py`、`mcp_tool_adapter.py`、`mcp_config_writer.py` | `MCPClientManager` 内部用一个常驻的"owner task" + `asyncio.Queue` 串行化所有连接/关闭操作——这是修复"自我扩展工具调用在独立 Task 里连接服务器、进程退出时 anyio cancel scope 跨 Task 报错"这个真实 bug 之后的设计，不是从一开始就有的。 |
+| **`skills/` + `skills_store/`**（Skill 系统） | `skill_loader.py`、`skill_schema.py`、`skills_store/*/`（数据，不是代码） | 每个 Skill 是独立子进程（`sys.executable run.py --args-json '...'`），用统一的一个 JSON blob 传参而不是逐个映射成 CLI flag；`PYTHONIOENCODING=utf-8` 强制注入子进程环境修复了 Windows 上一个真实的中文输出损坏 bug；`registered_skill_names` 是 `SkillLoader` 自己维护的列表，因为共享 `ToolRegistry` 本身不区分"这个工具是不是 Skill"。 |
+| **`tools/memory/` + `tools/profile/`**（双轨记忆） | `memory_store.py`/`memory_tool.py`（拉取式）、`user_profile_store.py`/`user_profile_tool.py`（推送式） | 刻意做成两种不同取舍的互补机制，不是同一个东西的两份实现：`remember_fact`/`recall_facts` 不进 system prompt、需要模型主动查；用户画像启动时读一次直接拼进 system prompt、模型不需要调用任何工具就"认识"用户，代价是画像的更新只在下次重启后才反映到当前运行的 system prompt 里。两者都是 JSON 文件 + `asyncio.Lock` 的同一套持久化模式。 |
+| **原生业务工具** | `tools/notes/`、`tools/calendar/`、`tools/tasks/`、`tools/calc/`、`tools/web/`、`tools/human/` | 每个子包只对外暴露一个 `register_x_tools(registry, ...)` 函数，`main.py` 是唯一调用者，彼此互不 import。`calendar`/`tasks` 共享同一个 `confirmation_channel` 实例；`notes` 强制走 `path_guard.py` 的沙箱路径校验；`calc` 是手写 AST 白名单解释器，不调用 `eval`/`exec`。 |
+| **`config/`**（配置加载） | `settings.py`（`pydantic-settings`）、`agents.json`、`mcp_servers.json` | `settings.py` 是全项目唯一读 `.env`/环境变量的地方，其余模块只接收 `Settings` 对象里已经解析好的字段；`agents.json`/`mcp_servers.json` 既是启动时的声明式配置，也是自我扩展工具和 CLI 命令运行时持久化写回的落点——同一份文件，两种写入路径。 |
 
 ### 核心抽象一览
 
