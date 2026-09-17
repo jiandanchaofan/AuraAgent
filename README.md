@@ -6,10 +6,11 @@
 
 - **核心异步 ReAct 循环**（`core/react_engine.py`）：Reason → Act → Observe，每一轮的 Thought / Tool Call / Observation 都打印到终端并写入 `logs/session-*.jsonl`。
 - **可插拔的 LLM 抽象层**（`providers/`）：`LLMProvider` 接口 + 两个真实实现——`AnthropicProvider`（官方 `anthropic` SDK）和 `OpenAIProvider`（官方 `openai` SDK，走 Chat Completions + Function Calling，同时兼容 OpenAI 和任何 OpenAI 协议兼容的服务，如 DeepSeek，只需切换 `OPENAI_BASE_URL`）。通过 `.env` 里的 `AURA_LLM_PROVIDER` 切换。
-- **本地 Markdown 笔记工具**（`tools/notes/`）：`search_notes` / `read_note` / `create_note` / `update_note`，所有文件操作严格限制在 `sandbox/notes/` 内，防止路径穿越。
+- **本地 Markdown 笔记工具**（`tools/notes/`）：`search_notes` / `read_note` / `create_note` / `update_note`，所有文件操作严格限制在 `sandbox/notes/` 内，防止路径穿越。沙盒校验函数 `resolve_within_sandbox()` 现在住在 `tools/sandbox_path.py`（原来在 `tools/notes/path_guard.py`——它本来就跟"notes"无关，只是历史上放错了地方，`tools/files/` 需要同一份逻辑时顺手搬了家）。
+- **通用本地文件管理**（`tools/files/`）：`list_directory`/`read_file`/`write_file`/`delete_file`/`move_file`/`copy_file`/`get_file_info`/`search_files` 八个工具，管的是笔记之外的任意文件。跟其它 sandbox 不同的是，这个沙盒根**可以通过 `.env` 里的 `AURA_WORKSPACE_ROOT` 改指向用户真实的工作目录**（默认 `sandbox/workspace/`）——边界（`resolve_within_sandbox()`）本身从不取消，只是位置可配置。`delete_file` 始终要人工确认；`move_file`/`copy_file` 只在目的路径**已经存在、会被覆盖**时才确认，平移到一个新位置不用打扰人——跟 `delete_task` 的确认原则一脉相承。挂给 `orchestrator`（跟笔记管理是同一类"本地资源操作"）。
 - **本地 JSON 日历 + Human-in-the-loop 确认**（`tools/calendar/`, `confirmation/`）：`list_calendar_events` / `create_calendar_event` / `update_calendar_event` / `delete_calendar_event`，事件持久化在 `sandbox/calendar/events.json`。删除操作、以及对标记为 `important` 事件的修改，都会通过终端 Y/N 交互确认后才执行；用户拒绝时返回普通 Observation 而不是抛异常。
 - **任务清单工具**（`tools/tasks/`）：`create_task` / `list_tasks` / `complete_task` / `delete_task`，持久化模式和日历完全一致（`sandbox/tasks/tasks.json`）；`delete_task` 复用日历那一个 `confirmation_channel` 实例，同样走终端确认。
-- **安全计算 + 网页抓取工具**（`tools/calc/`, `tools/web/`）：`calculate`（基于 `ast` 白名单手写解释器求值数学表达式，不用 `eval`/`exec`，抗对抗性输入）、`fetch_url`（httpx 异步抓取网页转纯文本，scheme 白名单 + 超时 + 大小截断；已知局限：不做 SSRF IP 段过滤，也无法绕过需要 JS 执行的反爬挑战页）。
+- **安全计算 + 网页抓取工具**（`tools/calc/`, `tools/web/`）：`calculate`（基于 `ast` 白名单手写解释器求值数学表达式，不用 `eval`/`exec`，抗对抗性输入）、`fetch_url`（httpx 异步抓取网页转纯文本，scheme 白名单 + 超时 + 大小截断；已知局限：不做 SSRF IP 段过滤，也无法绕过需要 JS 执行的反爬挑战页）。同一个模块里还有两个更通用的网络工具：`http_request`（`GET`/`POST`/`PUT`/`PATCH`/`DELETE` + 自定义 headers/body，`fetch_url` 做不到的提交表单/调用 JSON API 场景）、`download_file`（把 URL 内容**流式写进 `tools/files/` 的同一个 workspace 沙盒**，不是任意路径，单独有一档 `download_max_bytes` 大小上限，比纯文本的 `fetch_url_max_bytes` 宽松得多）。两者都挂给 `researcher`，跟 `fetch_url` 同一归属。真实网络验证过：真实下载一个公开小文件落进沙盒、真实对 `httpbin.org` 发一次带自定义 header 的 POST 并核对回显内容。刻意没做的：通用 Shell/命令执行工具（任意命令没法像 `propose_new_skill` 那样"审查一次、复用多次"，风险不可控，需要就引导写一个具体的 Skill）、原生浏览器自动化（引导通过 `find_capability`→`propose_mcp_server` 装一个现成的 Playwright/Puppeteer MCP server，不往项目里加浏览器二进制依赖）。
 - **跨会话记忆工具**（`tools/memory/`）：`remember_fact` / `recall_facts`，持久化在 `sandbox/memory/facts.json`。拉取式设计——记忆内容不自动注入 system prompt，模型需要主动调用才能读到，避免随记忆条数增长而增加每轮 token 成本。（跟下面的用户画像是刻意设计成两种不同取舍的互补机制，不是同一个东西的两份实现。）
 - **结构化、自动注入的用户画像**（`tools/profile/`）：跟 `remember_fact`/`recall_facts`"拉取式"相反的"推送式"设计——`update_user_profile` 把 `preferences`/`habits`/`common_topics`/`notes` 写进 `sandbox/memory/user_profile.json`（同样是 JSON + `asyncio.Lock`），但 `main.py` 启动时会读一次并**直接拼进 orchestrator 的 system prompt**，模型不需要调用任何工具就"认识"用户。列表字段合并去重、`notes` 追加而不是覆盖，避免一次调用抹掉之前积累的内容。取舍很直接：画像默认常驻但只在进程重启后反映最新一次更新（`AsyncReActEngine.system_prompt` 本来就是构造时固定的一个字符串，不是每轮重新读的），换来的是"模型天然记得你是谁"而不需要每次显式 recall——已用真实 DeepSeek 两次独立进程运行验证：第一次调用 `update_user_profile` 并确认文件正确合并写入，第二次全新进程、不调用任何工具，模型直接从 system prompt 里复述出画像内容。
 - **`ask_human` 工具**（`tools/human/`）：让模型能暂停当前任务、向人类提出开放式问题并等待自由文本回答。复用日历/任务工具已有的 `confirmation_channel` 实例——`ConfirmationChannel` 接口在原来的 `confirm()`（Y/N）基础上加了 `ask_open_question()`（自由文本），同一个物理通道，两种响应形态。
@@ -81,7 +82,7 @@ AuraAgent/
 ├── agents/                 # Multi-Agent：AgentDefinition/Registry、ScopedToolRegistryView、编排模式
 ├── cli/                    # 人工直连 "/" 命令层（/help /config /agents /skills），不经过引擎/LLM
 ├── providers/               # LLMProvider 抽象层 + Anthropic/OpenAI 实现 + SwappableProvider（运行时切换）
-├── tools/                  # ToolRegistry + notes/calendar/tasks/calc/web/memory/human/profile 工具
+├── tools/                  # ToolRegistry + sandbox_path.py（共享沙盒守卫）+ notes/files/calendar/tasks/calc/web/memory/human/profile 工具
 ├── confirmation/            # Human-in-the-loop 确认通道抽象
 ├── mcp_integration/         # MCP 客户端（真实实现：stdio 连接 + 工具适配）
 ├── mcp_servers/             # 零外部依赖的示例 MCP server，用于本地验证
@@ -102,7 +103,7 @@ AuraAgent/
 
 - **白盒优先**：不用任何"黑盒" Agent 框架（LangChain 之类），从最基础的 ReAct 循环到最上层的 Multi-Agent 编排全部原生实现，建立在官方 SDK 之上。每一轮 Thought / Tool Call / Observation 都被打印到终端、写进 `logs/session-*.jsonl`，可见、可回放、可审计——这是整个项目最早定下、也贯穿始终的第一原则。
 - **插件优先 / 严格解耦**：`core/react_engine.py` 是全项目唯一的"引擎"，但它不 import `tools/`、`providers/`、`confirmation/`、`agents/` 下任何具体实现——只依赖几个抽象接口。新增一个工具来源（MCP）、一种能力载体（Skill）、一套编排模式（Multi-Agent）都不需要改引擎一行代码。
-- **小步演进，随时可跑**：整个项目是按 Epic（A 记忆/ask_human → B MCP → C Skill → D Multi-Agent → F 自我扩展一期 → H 自我扩展二期 → I CLI 命令层 → J 用户画像 → K 自主发现）一批批加出来的，每一批都独立可运行、有真实测试覆盖、经过真实 LLM 端到端验证后才提交。没有"半成品"状态。
+- **小步演进，随时可跑**：整个项目是按 Epic（A 记忆/ask_human → B MCP → C Skill → D Multi-Agent → F 自我扩展一期 → H 自我扩展二期 → I CLI 命令层 → J 用户画像 → K 自主发现 → L 本地文件+网络增强）一批批加出来的，每一批都独立可运行、有真实测试覆盖、经过真实 LLM 端到端验证后才提交。没有"半成品"状态。
 - **安全默认，风险分级处理**：能从架构上消除的风险就消除（`calculate` 用手写 AST 解释器而不是 `eval`，笔记工具强制沙箱路径），不能消除的风险交给人（破坏性操作走 HITL 确认，LLM 自己生成代码必须经过人工审查完整源码才能执行）。
 
 ### 分层架构
@@ -123,7 +124,7 @@ graph TD
     Engine -->|只依赖抽象| ToolView["ScopedToolRegistryView<br/>每个 Agent 一份，agents/"]
     ToolView -->|过滤 + 强制校验| Registry["ToolRegistry<br/>全项目唯一共享单例"]
 
-    Native["原生工具<br/>notes / calendar / tasks / calc / web / memory / human"] -->|register| Registry
+    Native["原生工具<br/>notes / files / calendar / tasks / calc / web / memory / human"] -->|register| Registry
     MCPSrc["MCP Server<br/>mcp_integration/"] -->|register| Registry
     SkillSrc["Skill 脚本<br/>skills_store/*"] -->|register| Registry
     SelfExtend["propose_new_skill / propose_new_agent<br/>propose_mcp_server / propose_capability_grant<br/>propose_external_skill<br/>tools/self_extend/"] -->|运行时热 register| Registry
@@ -159,7 +160,7 @@ graph TD
 | **`mcp_integration/`**（MCP 客户端）                 | `mcp_client_manager.py`、`mcp_tool_adapter.py`、`mcp_config_writer.py`                                                                                                                                    | `MCPClientManager` 内部用一个常驻的"owner task" + `asyncio.Queue` 串行化所有连接/关闭操作——这是修复"自我扩展工具调用在独立 Task 里连接服务器、进程退出时 anyio cancel scope 跨 Task 报错"这个真实 bug 之后的设计，不是从一开始就有的。                                                                                                                 |
 | **`skills/` + `skills_store/`**（Skill 系统）      | `skill_loader.py`、`skill_schema.py`、`skills_store/*/`（数据，不是代码）                                                                                                                                 | 每个 Skill 是独立子进程（`sys.executable run.py --args-json '...'`），用统一的一个 JSON blob 传参而不是逐个映射成 CLI flag；`PYTHONIOENCODING=utf-8` 强制注入子进程环境修复了 Windows 上一个真实的中文输出损坏 bug；`registered_skill_names` 是 `SkillLoader` 自己维护的列表，因为共享 `ToolRegistry` 本身不区分"这个工具是不是 Skill"。           |
 | **`tools/memory/` + `tools/profile/`**（双轨记忆） | `memory_store.py`/`memory_tool.py`（拉取式）、`user_profile_store.py`/`user_profile_tool.py`（推送式）                                                                                                  | 刻意做成两种不同取舍的互补机制，不是同一个东西的两份实现：`remember_fact`/`recall_facts` 不进 system prompt、需要模型主动查；用户画像启动时读一次直接拼进 system prompt、模型不需要调用任何工具就"认识"用户，代价是画像的更新只在下次重启后才反映到当前运行的 system prompt 里。两者都是 JSON 文件 + `asyncio.Lock` 的同一套持久化模式。               |
-| **原生业务工具**                                       | `tools/notes/`、`tools/calendar/`、`tools/tasks/`、`tools/calc/`、`tools/web/`、`tools/human/`                                                                                                      | 每个子包只对外暴露一个`register_x_tools(registry, ...)` 函数，`main.py` 是唯一调用者，彼此互不 import。`calendar`/`tasks` 共享同一个 `confirmation_channel` 实例；`notes` 强制走 `path_guard.py` 的沙箱路径校验；`calc` 是手写 AST 白名单解释器，不调用 `eval`/`exec`。                                                                  |
+| **原生业务工具**                                       | `tools/notes/`、`tools/files/`、`tools/calendar/`、`tools/tasks/`、`tools/calc/`、`tools/web/`、`tools/human/`                                                                                                      | 每个子包只对外暴露一个`register_x_tools(registry, ...)` 函数，`main.py` 是唯一调用者，彼此互不 import。`calendar`/`tasks`/`files` 共享同一个 `confirmation_channel` 实例；`notes`/`files` 都强制走 `tools/sandbox_path.py` 的沙箱路径校验（各自指向不同的沙盒根，`files` 的可以通过 `AURA_WORKSPACE_ROOT` 改指向真实工作目录）；`calc` 是手写 AST 白名单解释器，不调用 `eval`/`exec`。                                                                  |
 | **`config/`**（配置加载）                            | `settings.py`（`pydantic-settings`）、`agents.json`、`mcp_servers.json`                                                                                                                                 | `settings.py` 是全项目唯一读 `.env`/环境变量的地方，其余模块只接收 `Settings` 对象里已经解析好的字段；`agents.json`/`mcp_servers.json` 既是启动时的声明式配置，也是自我扩展工具和 CLI 命令运行时持久化写回的落点——同一份文件，两种写入路径。                                                                                                     |
 
 ### 核心抽象一览
@@ -214,7 +215,7 @@ sequenceDiagram
 
 | 风险点                      | 设计手段                                                                                                                                                                                                                                 |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 笔记工具文件系统越权        | `tools/notes/path_guard.py` 拒绝绝对路径和 `..` 穿越，越权直接报错而不是静默截断                                                                                                                                                     |
+| 笔记/通用文件工具系统越权   | `tools/sandbox_path.py::resolve_within_sandbox()` 拒绝绝对路径和 `..` 穿越，越权直接报错而不是静默截断；`tools/notes/` 和 `tools/files/` 共用同一份逻辑，各自指向不同的沙盒根                                                    |
 | 数学表达式注入              | `calculate` 用 `ast` 白名单手写递归解释器，全程不调用 `eval`/`exec`，压根不存在"沙箱逃逸"这个 bug 类别                                                                                                                           |
 | 破坏性操作（删日历/删任务） | `ConfirmationChannel.confirm()` 终端 Y/N 确认，拒绝返回普通 Observation 而不是抛异常                                                                                                                                                   |
 | Agent 越权调用工具          | `ScopedToolRegistryView.dispatch()` 强制重新校验 `capabilities`，不只是在 `get_tool_specs()` 展示层过滤——即使该工具真实存在于共享 registry 里也会被拒绝                                                                          |
@@ -224,7 +225,9 @@ sequenceDiagram
 | LLM 发起任意外部命令        | `propose_mcp_server`（`risk_level=arbitrary_execution`，风险最高）：无代码可读，审批即信任命令/包本身；环境变量**值**只能由人工直接输入，绝不经过 LLM 上下文或日志                                                             |
 | LLM 悄悄扩大自己能调用的工具范围 | `propose_capability_grant`（`risk_level=capability_grant`，四档里最轻）：不装任何新代码，只是把一个已装、已审查过的工具加进 `capabilities`；仍然走人工确认而不是自动放行，因为 `capabilities` 本身就是强制边界，悄悄放宽它人不知情就是真实风险 |
 | LLM 从不可信的第三方来源装 Skill | `propose_external_skill`（`risk_level=code_execution`，跟 `propose_new_skill` 同档）：审批文案显式提示"来自第三方聚合站 SkillsMP，非官方来源"，不会把外部代码包装成跟官方来源同等可信；结构预检查复用 `skills/skill_package.py`，同一套规则 |
-| 网页抓取滥用                | `fetch_url` 限制 scheme 白名单（拒绝 `file://`）、超时、响应体大小上限；已知局限不做 SSRF 的 IP 段过滤                                                                                                                               |
+| 网页抓取滥用                | `fetch_url`/`http_request` 限制 scheme 白名单（拒绝 `file://`）、超时、响应体大小上限；已知局限不做 SSRF 的 IP 段过滤                                                                                                                               |
+| 下载文件写到任意路径        | `download_file` 的目的路径同样走 `resolve_within_sandbox()`，落在跟 `tools/files/` 相同的 workspace 沙盒里，不是任意本机路径；单独有 `download_max_bytes` 上限（比纯文本的 `fetch_url_max_bytes` 宽松，因为下载对象通常是真实文件） |
+| 任意本地命令执行            | **架构上直接不提供这个能力**——没有通用 Shell/命令执行工具；需要跑命令的场景引导用 `propose_new_skill`（写一个具体、单一用途、人工审查过完整代码的脚本），而不是开一个"每次调用都要重新审查任意命令"的后门 |
 | 并发写本地 JSON 存储        | 日历/任务/记忆三个 provider 各自一把`asyncio.Lock`，锁住整个方法体而不只是写操作；`config/agents.json`/`config/mcp_servers.json` 的运行时持久化写回同样各自一把锁                                                                  |
 
 ### 可扩展性：加一个新能力要改哪些文件
@@ -252,5 +255,7 @@ sequenceDiagram
 | I    | 人工直连 CLI 命令层：`/help` `/config` `/agents` `/skills`（配置 API、管理团队、加载外部 Skill）          | ✅ 已完成      |
 | J    | 用户画像：结构化、自动注入 system prompt 的用户画像（区别于按需检索的`remember_fact`）                          | ✅ 已完成      |
 | K    | 自主发现：`find_capability`（内部/官方 MCP registry/SkillsMP 三路搜索）+ `propose_capability_grant` + `propose_external_skill` | ✅ 已完成      |
+| L    | 本地操控能力一期：通用文件管理（`tools/files/`，可配置 workspace 沙盒）+ 网络增强（`http_request`/`download_file`）；明确不做通用 Shell 工具，浏览器自动化引导走 MCP | ✅ 已完成      |
+| L2   | 系统/桌面操作（剪贴板、截图、进程管理、通知等）——设计草案已留档，依赖和跨平台细节留待独立排期 | 暂缓，未来路标 |
 | G    | PM 能力团队扩编：`user_researcher`/`analyst` 新 Agent + `make_docx`/`make_html_report` + 报告输出沙箱加固 | 暂缓，未来路标 |
 | E    | 其他编排模式、FastAPI 封装、Google Calendar OAuth、A2A 协议对外互通                                               | 更远期，仅占位 |
