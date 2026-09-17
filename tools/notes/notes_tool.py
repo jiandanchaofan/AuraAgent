@@ -1,6 +1,6 @@
 """Local Markdown note management tools: search_notes, read_note,
 create_note, update_note. All filesystem access is confined to the notes
-sandbox root via tools/notes/path_guard.resolve_within_sandbox().
+sandbox root via tools/sandbox_path.resolve_within_sandbox().
 """
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from typing import Any
 
 from core.exceptions import ToolExecutionError
 from tools.base import ToolSpec
-from tools.notes.path_guard import resolve_within_sandbox
 from tools.registry import ToolRegistry
+from tools.sandbox_path import resolve_within_sandbox
 
 
 def register_notes_tools(registry: ToolRegistry, sandbox_root: Path) -> None:

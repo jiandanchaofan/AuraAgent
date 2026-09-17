@@ -34,6 +34,7 @@ from tools.base import RegisteredTool
 from tools.calc.calculate_tool import register_calculate_tools
 from tools.calendar.calendar_tool import register_calendar_tools
 from tools.calendar.local_json_calendar import LocalJSONCalendarProvider
+from tools.files.file_tool import register_file_tools
 from tools.human.ask_human_tool import register_ask_human_tools
 from tools.memory.memory_store import MemoryStore
 from tools.memory.memory_tool import register_memory_tools
@@ -49,7 +50,7 @@ from tools.self_extend.propose_mcp_tool import register_propose_mcp_tool
 from tools.self_extend.propose_skill_tool import register_propose_skill_tool
 from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
 from tools.tasks.task_tool import register_task_tools
-from tools.web.fetch_url_tool import build_default_http_client, register_fetch_url_tools
+from tools.web.fetch_url_tool import build_default_http_client, register_fetch_url_tools, register_http_tools
 
 
 async def main() -> None:
@@ -65,6 +66,8 @@ async def main() -> None:
     task_provider = LocalJSONTaskProvider(settings.tasks_file)
     register_task_tools(registry, task_provider, confirmation_channel)
 
+    register_file_tools(registry, settings.workspace_root, confirmation_channel)
+
     memory_store = MemoryStore(settings.memory_file)
     register_memory_tools(registry, memory_store)
     register_ask_human_tools(registry, confirmation_channel)
@@ -76,6 +79,10 @@ async def main() -> None:
     http_client = build_default_http_client()
     register_fetch_url_tools(
         registry, http_client, settings.fetch_url_timeout_seconds, settings.fetch_url_max_bytes
+    )
+    register_http_tools(
+        registry, http_client, settings.fetch_url_timeout_seconds, settings.fetch_url_max_bytes,
+        settings.workspace_root, settings.download_max_bytes,
     )
 
     mcp_manager = MCPClientManager(settings.mcp_config_path, registry)

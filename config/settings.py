@@ -32,12 +32,19 @@ class Settings(BaseSettings):
 
     fetch_url_timeout_seconds: float = Field(default=10.0, alias="AURA_FETCH_URL_TIMEOUT_SECONDS")
     fetch_url_max_bytes: int = Field(default=200_000, alias="AURA_FETCH_URL_MAX_BYTES")
+    download_max_bytes: int = Field(default=50_000_000, alias="AURA_DOWNLOAD_MAX_BYTES")
     skill_timeout_seconds: float = Field(default=30.0, alias="AURA_SKILL_TIMEOUT_SECONDS")
 
     # Fixed sandbox locations — not env-configurable in v1 so every tool's
     # blast radius is predictable regardless of how the process is launched.
     sandbox_root: Path = PROJECT_ROOT / "sandbox"
     notes_sandbox_root: Path = PROJECT_ROOT / "sandbox" / "notes"
+    # The one exception to "not env-configurable": file_tool's general
+    # file-management tools (tools/files/) are meant to be pointed at a
+    # user's REAL working directory, not just a repo-local sandbox — the
+    # boundary itself (resolve_within_sandbox()) still always applies,
+    # only its location is configurable.
+    workspace_root: Path = Field(default=PROJECT_ROOT / "sandbox" / "workspace", alias="AURA_WORKSPACE_ROOT")
     calendar_events_file: Path = PROJECT_ROOT / "sandbox" / "calendar" / "events.json"
     tasks_file: Path = PROJECT_ROOT / "sandbox" / "tasks" / "tasks.json"
     memory_file: Path = PROJECT_ROOT / "sandbox" / "memory" / "facts.json"

@@ -1,13 +1,12 @@
-"""Tests for the Markdown note tools, including sandbox path-traversal
-and absolute-path-bypass protection.
-"""
+"""Tests for the Markdown note tools. See tests/test_sandbox_path.py for
+the generic path-traversal/absolute-path-bypass protection tests
+(resolve_within_sandbox() itself is not notes-specific)."""
 from __future__ import annotations
 
 import pytest
 
-from core.exceptions import SandboxPathError, ToolExecutionError
+from core.exceptions import ToolExecutionError
 from tools.notes.notes_tool import register_notes_tools
-from tools.notes.path_guard import resolve_within_sandbox
 from tools.registry import ToolRegistry
 
 
@@ -57,24 +56,3 @@ async def test_read_note_blocks_path_traversal(registry_and_sandbox):
     registry, _sandbox = registry_and_sandbox
     with pytest.raises(ToolExecutionError):
         await registry.dispatch("read_note", {"path": "../../etc/passwd"})
-
-
-def test_path_guard_blocks_traversal(tmp_path):
-    sandbox = tmp_path / "notes"
-    sandbox.mkdir()
-    with pytest.raises(SandboxPathError):
-        resolve_within_sandbox(sandbox, "../../etc/passwd")
-
-
-def test_path_guard_blocks_absolute_paths(tmp_path):
-    sandbox = tmp_path / "notes"
-    sandbox.mkdir()
-    with pytest.raises(SandboxPathError):
-        resolve_within_sandbox(sandbox, "/etc/passwd")
-
-
-def test_path_guard_allows_nested_relative_path(tmp_path):
-    sandbox = tmp_path / "notes"
-    sandbox.mkdir()
-    resolved = resolve_within_sandbox(sandbox, "ideas/todo.md")
-    assert resolved == (sandbox / "ideas" / "todo.md").resolve()

@@ -1,10 +1,17 @@
 """Sandbox path resolution shared by every filesystem-touching tool.
 
-Every note tool must resolve user/LLM-supplied relative paths through
-resolve_within_sandbox() before touching the filesystem. This is the
-single choke point that blocks both path traversal (`../../etc/passwd`)
-and absolute-path bypass (`/etc/passwd`, `C:\\...`), regardless of what a
-tool call argument contains.
+Originally lived at tools/notes/path_guard.py — relocated here (a level
+up, alongside tools/registry.py and tools/base.py) once a second tool
+package (tools/files/) needed the exact same function against a different
+sandbox_root. The function itself was already generic (it has never
+known anything about notes specifically); only its address changed.
+
+Every filesystem tool must resolve user/LLM-supplied relative paths
+through resolve_within_sandbox() before touching disk. This is the single
+choke point that blocks both path traversal (`../../etc/passwd`) and
+absolute-path bypass (`/etc/passwd`, `C:\\...`), regardless of what a tool
+call argument contains or which sandbox_root a particular tool package
+was configured with.
 """
 from __future__ import annotations
 
