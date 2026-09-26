@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     skills_dir: Path = PROJECT_ROOT / "skills_store"
     mcp_config_path: Path = PROJECT_ROOT / "config" / "mcp_servers.json"
     agents_config_path: Path = PROJECT_ROOT / "config" / "agents.json"
+    # Where /config set-key (cli/commands.py) and its GUI REST counterpart
+    # (gui/routes.py) write a newly-entered API key -- deliberately a
+    # Settings field, not a bare PROJECT_ROOT constant inside
+    # core/bootstrap.py, so a test can redirect it at a tmp_path file
+    # instead of ever touching the real .env (same reasoning as
+    # agents_config_path/workspace_root above).
+    env_file_path: Path = PROJECT_ROOT / ".env"
 
 
 def load_settings() -> Settings:

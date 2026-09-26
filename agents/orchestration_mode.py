@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from core.message_types import ConversationTurn
+
 
 class OrchestrationMode(ABC):
     @abstractmethod
-    async def run(self, user_input: str) -> str: ...
+    async def run(self, user_input: str, history: list[ConversationTurn] | None = None) -> str: ...

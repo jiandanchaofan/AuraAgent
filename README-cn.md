@@ -39,6 +39,10 @@
   - `/agents` [`add` | `remove <name>`]：查看/新增/移除团队成员。`add` 交互式收集 `name`/`system_prompt`/`capabilities`，构造+碰撞检查复用 `propose_new_agent` 抽出来的同一份 `agents/agent_builder.ensure_worker_name_available()`，最终仍会请人确认一次（防误输入，不是防 LLM 越权）。
   - `/skills` [`load <url>` | `install <local_path>`]：查看已安装 Skill；从网页链接下载或本地文件安装一个 Skill 包（`.zip`，含 `SKILL.md`+`run.py`）。校验（`skills/skill_package.py`）拒绝非法 zip、路径穿越（zip-slip）、结构不明确（顶层不止一个候选目录）的包，5MB 大小上限；**完整代码**+静态扫描警告一起打印给人看，审查强度跟 `propose_new_skill` 完全一致——代码的**来源**是外部下载/上传而不是 LLM 现场生成，不代表可以降低审查标准。
   - 三个命令批准后走的都是同一套热注册+持久化路径（`agents/agent_config_writer.py`/`mcp_integration/mcp_config_writer.py`），跟自我扩展工具一样重启后依然生效。
+- **GUI 后端第一阶段（M1）：共享组合根 + WebSocket 传输**（`core/bootstrap.py`, `gui/`）：迈向图形化 App（设计参考 Claude Code/Workbuddy，CLI/GUI 功能一致是硬约束）的第一步，纯后端，还没有前端。把 `main.py` 里"装配所有工具/Agent/自我扩展工具"那整块逻辑原样抽成 `core/bootstrap.py::build_app_context(settings, confirmation_channel, logger) -> AppContext`——这个函数完全不知道终端或 WebSocket 的存在，只负责装配。`main.py` 和新增的 `gui/server.py` 调用的是**同一个**函数；不管从哪个前端新装的能力，落地的都是同一个 `ToolRegistry`/`config/agents.json`，这就是"功能一致"在架构上被强制保证，而不是靠记性。做到这一步之前先做了两个更小的重构：`core/logger.py::AuraLogger` 从"每个 `log_*` 方法里硬编码打印终端+写 JSONL"改成一个 `LogSink` 抽象类（`write(event) -> None`，绝不能阻塞）+ 一个 sink 列表，`AuraLogger` 依次喂给每个 sink——`TerminalSink`/`JSONLSink` 原样复刻旧行为，新增的 `WebSocketSink` 用 `asyncio.Queue` 缓冲事件再异步 drain 出去，因为 `AsyncReActEngine` 调 `log_*` 是同步调用、没有 `await`；`ConfirmationChannel`（已有的抽象，接口没改）多了第二个真实实现 `WebSocketConfirmationChannel`，用标准的"按 `request_id` 存一堆 pending `asyncio.Future`"模式，把一次 `confirmation_request`/`confirmation_response` 在同一条 WebSocket 上的往返，变成 `confirm()`/`ask_open_question()` 能直接 `await` 的东西——`ask_open_question()` 的回答两个实现都依然刻意不写日志，因为这是 `propose_mcp_server` 用来收集环境变量密钥值的通道。顺带修了一个真实存在的缺口：`AuraLogger.log_confirmation()` 这个方法早就写好了，但之前没有任何地方调用过——确认决定在 `logs/session-*.jsonl` 里一直是不可见的；现在两个 `ConfirmationChannel` 实现都会调用它。`gui/server.py` 的单一 `/ws` 端点同时承载出站事件流和双向确认协议；它的接收循环把 `orchestrator.run()` 派发成一个后台 `asyncio.Task`，而不是直接内联 `await`——直接 `await` 会死锁，因为一次 run 内部可能正卡在 `confirm()` 里等一条 `confirmation_response` 消息，而这条消息只能靠同一个接收循环读到。已用一个真实跑起来的服务端+真实 LLM 调用、通过原始 WebSocket 客户端验证过：一次普通聊天往返，以及一次 `delete_file` 调用产出真实的 `confirmation_request` → 批准 → `confirmation` 事件 → JSONL 记录 → 真的删除文件，事后确认 `config/agents.json` 和会话自己的 JSONL 都没有留下测试痕迹。
+- **GUI 前端 + 命令层对应面板，M2+M3**（`gui/frontend/`, `gui/routes.py`, `cli/service.py`）：M2 是一个最小的 React+Vite 聊天界面（`gui/frontend/`），对接 M1 的 `/ws` 端点——一个纯函数（`buildTurns.js`）把扁平的事件流转换成一棵"轮次"树，通过 tool_call/observation 的 `call_id` 配对推断出 `delegate_to_<worker>` 的嵌套关系（原始事件结构里没有父调用字段，这是纯前端推断出来的，没有改后端），这样一个 Worker 完整的 Thought/Tool Call/Observation 序列就会嵌套渲染在 Leader 发起委派的那次调用里面，而不是像终端那样扁平交错；确认/开放式问题请求渲染成内嵌的、按这个项目已有的四档自我扩展风险分级配色的卡片。`gui/server.py` 直接托管构建产物（`gui/static/`，已 gitignore）在 `/`，一个 `uvicorn gui.server:app` 就能把整个 App 端出来。M3 给 CLI 的 "/" 命令配了 GUI 对应物：`cli/commands.py` 内部逻辑拆成了 `cli/service.py`（纯粹的取数据/动作函数——`list_agents`/`get_config_status`/`list_skills`、`switch_provider`/`set_api_key`/`validate_new_agent`+`commit_new_agent`/`remove_agent`/`stage_skill_from_*`+`commit_skill`——里面没有一处自己调用 `input()`/`print()`/`getpass()`），`cli/commands.py` 现在是它上面一层很薄的适配器（验证过行为完全一致：27 个已有的 CLI 命令测试在重构后的代码上原样全部通过）。`gui/routes.py` 新增 `/api/config`、`/api/agents`、`/api/skills`（GET，实时快照）以及对应的写入端点，调用的是完全同一套 `cli/service.py` 函数——Settings/Team/Skills 面板的一次操作和它对应的 "/" 命令，结构上就不可能走出两套不同的行为。通过 GUI 装 Skill 保留了 CLI 那种两阶段形状（`POST /api/skills/stage` 返回完整的 `SKILL.md`/`run.py` 文本和静态扫描警告供人工审查，`POST /api/skills/commit` 才真正落地），而不是收成一次调用——因为外部来源的代码理应让人先读完再批准，跟 `propose_new_skill` 的要求一致；新增 worker 或者授权某个能力则直接一步到位，跟 CLI 自己 `/agents add` 最后那个 `[y/N]` 被形容为"防误输入，不是防 LLM 越权"是同一个道理。做这部分时顺带揪出并修了一个真实存在的潜在 bug：`core/bootstrap.py` 把 `CLIContext.env_file_path` 硬编码成了真实项目的 `.env`，完全不看传进去的 `Settings` 对象——意味着任何测试一旦真的跑到 `/config set-key` 就会悄悄写进真实 `.env`；修复方式是给 `Settings` 加一个 `env_file_path` 字段（跟 `agents_config_path` 同一个套路）并接上。项目里没有浏览器自动化工具，所以前端/面板的验证方式是干净构建+lint+对着一个真实跑起来的后端核对真实 REST/WebSocket 流量是否符合界面预期，不是真的驱动一个浏览器操作——建议你亲自试一下（见下面"运行 GUI"）。
+- **桌面打包，M4**（`gui_app.py`）：把 `uvicorn gui.server:app` 端出来的那个 App 原样包进一个原生系统窗口（`pywebview`，Windows 上是 Edge WebView2）——`python gui_app.py` 就能拿到一个真正的应用窗口，不用打开浏览器、不用自己敲 URL。随机挑一个空闲的本地端口（`socket.bind(("127.0.0.1", 0))`），而不是固定端口，这样就不会跟已经在跑的 `uvicorn gui.server:app --port 8000` 或者自己的另一个实例冲突；把 `uvicorn.Server` 放到后台线程跑，主线程轮询 `server.started` 再开窗口（如果启动失败——比如 API Key 没配——会给出清楚的错误提示，而不是打开一个空白窗口）；关闭窗口会把 `server.should_exit` 设成 `True`，让 `gui/server.py` 生命周期的 `finally` 块（`AppContext.aclose()`，关掉 MCP 连接等等）照样跑一遍，跟 `python main.py` 退出时一样干净地收尾。已经真实验证过：真的启动了一次，通过系统进程列表确认脚本启动的那一刻，一整棵 `msedgewebview2` 进程树（浏览器/GPU/渲染/网络等子进程）确实被拉起来了，之后也干净地关闭——不只是"脚本没崩"，是真的开出了一个原生窗口。
+- **会话记忆 + 更智能的能力发现，Epic N1**（`core/react_engine.py`, `tools/self_extend/capability_search.py`）：修的是一个真实存在的实用性缺口——之前每一轮对话都是零上下文的，因为 `AsyncReActEngine.run()` 每次调用都会新建一个只有当前这一句话的空 `history`。`run()` 现在多了一个可选的 `history` 参数（默认 `None`，不传的话行为跟以前完全一样）；下一次调用把同一个列表对象传回去，它就会一直累积下去——因为循环体内部只对它做 `.append()`，从不重新赋值。`main.py` 的 REPL 给整个进程维护一份 `history`；`gui/server.py` 给每个 WebSocket 连接维护一份（断开重连=重新开始，跟重启 CLI 是同一个道理）。Worker 引擎（`agents/delegate_tool.py`）刻意继续不传 `history`——它们必须保持一次性、无状态，因为它们要支持并发执行（`asyncio.gather`），一份共享的可变历史列表会在并发委派之间产生真实的数据竞争。给会话加上持久历史之后，GUI 这边冒出一个之前不存在的新风险：同一个连接上前后脚发来的两条 `user_message` 现在会竞争往同一份共享 history 里追加——修复方式是让 WebSocket 的接收循环在上一条还没跑完时直接拒绝（不是排队）新来的 `user_message`，用一条普通的 `error` 事件告知，沿用现有的白盒事件流，没有发明新的消息类型。做这部分时还顺带揪出一个完全独立的、真实存在的潜在 bug：`ctx.orchestrator` 其实是包在 Leader 的 `AsyncReActEngine` 外面一层很薄的 `LeaderWorkerOrchestrator`，它自己的 `run()` 根本没有转发新加的 `history` 参数——`main.py`/`gui/server.py` 的每一次调用本来都会因为多传了一个未知关键字参数而抛 `TypeError`（被外层的 `except Exception` 捞住，所以表现成一个被吞掉的错误而不是直接崩溃，这也是它不容易被发现的原因）——修复方式是把 `history` 一路穿透 `OrchestrationMode` 接口和三个实现（`LeaderWorkerOrchestrator`，以及 `SequentialPipelineOrchestrator`/`DebateOrchestrator` 两个占位实现，为了保持签名一致）。另外，`find_capability` 的内部搜索（`capability_search.py::search_internal()`）以前要求关键词重叠打分必须 > 0 才保留、还只截取前 5 个——用词跟工具描述不一致的匹配会被静默吞掉，而且作为一个真实存在的 bug，任何中文意图之前都会搜出空列表（`re.findall(r"[a-z0-9]+", ...)` 从非 ASCII 文本里提取不出任何词）。现在它会返回全部候选，只用打分做排序、绝不用打分做过滤，把"谁相关"这个判断交还给已经在用的 LLM，而不是靠一个更弱的关键词匹配器替模型预先决定它能看到什么。orchestrator 的 system prompt 也加了一段新的引导，鼓励它在动手之前先在自己的 Thought 里把多步骤请求的执行顺序列出来——纯提示词层面的引导，没有新工具、没有新架构。四项改动都做了真实验证：一次真实的 DeepSeek 对话里，两轮之后模型凭上下文（零工具调用）就答出了之前没被要求"记住"的一个事实（"我最喜欢的颜色是青绿色"）；同样的场景在一个真实 WebSocket 连接上复现了一遍，另外还故意留一个确认请求悬而未决，同时往同一个连接发第二条消息，确认拒绝逻辑真的生效了；`find_capability` 现在能为一个中文意图、以及一个跟工具描述完全没有共同关键词的英文意图都搜到 `market_new_products`（以前两种情况都会漏检）；一个真实的复合请求（"先调研 X，再创建一篇总结笔记"）在第一条 Thought 里就直接列出了执行步骤。
 
 ## 运行方式
 
@@ -66,6 +70,28 @@ python main.py
 
 默认的 Agent 团队（编辑 `config/agents.json` 自定义）：`orchestrator`（leader，管笔记/记忆/问人类，能委派给两个 worker）、`researcher`（网页抓取+计算）、`scheduler`（日历+任务）。试试"同时让 researcher 查一下 example.com、让 scheduler 建个任务"这种需要并发委派两个 worker 的指令。
 
+## 运行 GUI（M1-M4：后端、前端、面板、桌面应用）
+
+```bash
+# 首次运行需要先构建前端（产物输出到 gui/static/）
+cd gui/frontend
+npm install
+npm run build
+cd ../..
+
+# 方式一：真正的桌面窗口（推荐）
+python gui_app.py
+
+# 方式二：浏览器标签页，背后是同一个后端
+uvicorn gui.server:app --port 8000   # 然后打开 http://127.0.0.1:8000
+```
+
+不管哪种方式，你都会得到一个 **Chat** 标签页（可折叠的 Thought/Tool Call/Observation 块、`delegate_to_<worker>` 调用会渲染成那个 worker 完整一轮的嵌套子树、按风险分级配色的 `confirmation_request`/`open_question_request` 内嵌确认卡片），背后跟 `python main.py` 是完全同一套团队/工具集，走的是同一个 `ws://.../ws` 连接；另外还有 **Team**/**Settings**/**Skills** 三个标签页——分别对应 `/agents`/`/config`/`/skills`，背后是这些命令同一套 `cli/service.py` 逻辑（想用原始客户端直连调试的话，协议/REST 细节见 `gui/server.py` 和 `gui/routes.py` 的模块 docstring）。`gui_app.py`（M4）只是把同一个 App 包进一个原生系统窗口（`pywebview`，Windows 上是 Edge WebView2）——它在后台线程里把后端跑在一个随机选取的空闲本地端口上，再开一个指向它的窗口，所以不会跟已经在跑的 `uvicorn gui.server:app` 冲突；关闭窗口会用跟 `python main.py` 退出时一样干净的方式把后端关掉。不要同时跑多个 AuraAgent 前端（CLI、`uvicorn gui.server:app`、`gui_app.py`）对着同一份 `config/agents.json`/`sandbox/`——并发模型（`asyncio.Lock`）是进程内的，不是跨进程的。
+
+前端开发（热更新）：`cd gui/frontend && npm run dev`（Vite 跑在 `:5173`，把 `/ws` 代理到 `:8000` 的后端——记得先在另一个终端启动 `uvicorn gui.server:app --port 8000`）。`gui/frontend/` 是源码，`gui/static/` 是构建产物（已加入 `.gitignore`，`npm run build` 随时可以重新生成），不是前端本体。
+
+**目前还没有自动化的浏览器测试**（项目里没有接入 Playwright 之类的浏览器工具）——前端的验证方式是：确认它能干净地构建、能被一个真实跑起来的后端正确托管、并且它所依赖的 WebSocket 事件结构跟一次真实 LLM 端到端运行完全吻合（见 `tests/test_gui_server.py` 和 Epic M1 的真实验证过程）。真正在浏览器里的观感（渲染效果、布局、HITL 卡片点击是否顺畅）还没有肉眼确认过——建议你亲自打开试一下，有任何看着不对的地方随时反馈。
+
 ## 运行测试
 
 ```bash
@@ -78,11 +104,13 @@ pytest
 
 ```
 AuraAgent/
-├── main.py                 # 组合根：装配 ToolRegistry + Leader/Worker 引擎 + REPL 入口
+├── main.py                 # CLI 前端：调用 core/bootstrap.py，再套一个 REPL 循环
+├── gui_app.py               # 桌面前端：包着 gui/server.py 那个 App 的 pywebview 窗口（M4）
+├── gui/                     # GUI：FastAPI+WebSocket+REST 后端（调用同一个 core/bootstrap.py）+ gui/frontend/（React+Vite 源码）+ gui/static/（构建产物，已 gitignore）+ gui/routes.py（REST，调用 cli/service.py）
 ├── config/                 # 配置加载 (pydantic-settings) + agents.json / mcp_servers.json
-├── core/                   # ReAct 引擎、日志、异常、消息类型（不依赖任何具体实现）
+├── core/                   # ReAct 引擎、bootstrap.py（共享组合根）、日志（LogSink 扇出）、异常、消息类型
 ├── agents/                 # Multi-Agent：AgentDefinition/Registry、ScopedToolRegistryView、编排模式
-├── cli/                    # 人工直连 "/" 命令层（/help /config /agents /skills），不经过引擎/LLM
+├── cli/                    # 人工直连 "/" 命令层（/help /config /agents /skills）+ cli/service.py（共享的取数据/动作逻辑，gui/routes.py 也在用），不经过引擎/LLM
 ├── providers/               # LLMProvider 抽象层 + Anthropic/OpenAI 实现 + SwappableProvider（运行时切换）
 ├── tools/                  # ToolRegistry + sandbox_path.py（共享沙盒守卫）+ notes/files/calendar/tasks/calc/web/memory/human/profile 工具
 ├── confirmation/            # Human-in-the-loop 确认通道抽象
@@ -105,7 +133,7 @@ AuraAgent/
 
 - **白盒优先**：不用任何"黑盒" Agent 框架（LangChain 之类），从最基础的 ReAct 循环到最上层的 Multi-Agent 编排全部原生实现，建立在官方 SDK 之上。每一轮 Thought / Tool Call / Observation 都被打印到终端、写进 `logs/session-*.jsonl`，可见、可回放、可审计——这是整个项目最早定下、也贯穿始终的第一原则。
 - **插件优先 / 严格解耦**：`core/react_engine.py` 是全项目唯一的"引擎"，但它不 import `tools/`、`providers/`、`confirmation/`、`agents/` 下任何具体实现——只依赖几个抽象接口。新增一个工具来源（MCP）、一种能力载体（Skill）、一套编排模式（Multi-Agent）都不需要改引擎一行代码。
-- **小步演进，随时可跑**：整个项目是按 Epic（A 记忆/ask_human → B MCP → C Skill → D Multi-Agent → F 自我扩展一期 → H 自我扩展二期 → I CLI 命令层 → J 用户画像 → K 自主发现 → L 本地文件+网络增强）一批批加出来的，每一批都独立可运行、有真实测试覆盖、经过真实 LLM 端到端验证后才提交。没有"半成品"状态。
+- **小步演进，随时可跑**：整个项目是按 Epic（A 记忆/ask_human → B MCP → C Skill → D Multi-Agent → F 自我扩展一期 → H 自我扩展二期 → I CLI 命令层 → J 用户画像 → K 自主发现 → L 本地文件+网络增强 → M1 共享组合根 + GUI WebSocket 后端 → M2 GUI 前端 → M3 GUI 命令层对应面板 → M4 GUI 桌面打包 → N1 会话记忆 + 更智能的能力发现）一批批加出来的，每一批都独立可运行、有真实测试覆盖、经过真实 LLM 端到端验证后才提交。没有"半成品"状态。
 - **安全默认，风险分级处理**：能从架构上消除的风险就消除（`calculate` 用手写 AST 解释器而不是 `eval`，笔记工具强制沙箱路径），不能消除的风险交给人（破坏性操作走 HITL 确认，LLM 自己生成代码必须经过人工审查完整源码才能执行）。
 
 ### 分层架构
@@ -260,4 +288,15 @@ sequenceDiagram
 | L    | 本地操控能力一期：通用文件管理（`tools/files/`，可配置 workspace 沙盒）+ 网络增强（`http_request`/`download_file`）；明确不做通用 Shell 工具，浏览器自动化引导走 MCP | ✅ 已完成      |
 | L2   | 系统/桌面操作（剪贴板、截图、进程管理、通知等）——设计草案已留档，依赖和跨平台细节留待独立排期 | 暂缓，未来路标 |
 | G    | PM 能力团队扩编：`user_researcher`/`analyst` 新 Agent + `make_docx`/`make_html_report` + 报告输出沙箱加固 | 暂缓，未来路标 |
-| E    | 其他编排模式、FastAPI 封装、Google Calendar OAuth、A2A 协议对外互通                                               | 更远期，仅占位 |
+| M1   | GUI 第一阶段：共享组合根（`core/bootstrap.py`）+ `LogSink` 扇出（Terminal/JSONL/WebSocket）+ `WebSocketConfirmationChannel` + 一个最小的 `/ws` FastAPI 端点（纯后端，无前端） | ✅ 已完成 |
+| M2   | GUI 第二阶段：最小 React+Vite 前端（`gui/frontend/`）——对话流、可折叠 Thought/Tool Call/Observation 块、`delegate_to_<worker>` 调用渲染成嵌套子树、按风险分级配色的 HITL 确认/开放问题卡片；`gui/server.py` 现在直接托管构建好的界面。验证方式是干净构建+真实 WebSocket 流量核对事件结构，**还没有在真实浏览器里肉眼确认过**（项目里没有浏览器自动化工具） | ✅ 已完成（后端已验证，浏览器观感待确认） |
+| M3   | GUI 第三阶段：命令层对应面板（Settings/Team/Skills），配套把 `cli/commands.py` 拆成 `cli/service.py`（不自己调 `input()`/`print()` 的取数据/动作函数），`gui/routes.py` 的 REST 端点直接复用；装 Skill 保留 CLI 的两阶段（先 stage 审查、再 commit）形状 | ✅ 已完成（后端已验证，浏览器观感待确认） |
+| M4   | GUI 第四阶段：`gui_app.py`，一个 `pywebview` 桌面窗口（真正的应用窗口，不是浏览器标签页），把同一个后端跑在随机选取的空闲端口上 | ✅ 已完成（真实验证过：启动时真的拉起了一整棵 WebView2 进程树，窗口运行正常） |
+| M5   | GUI 第五阶段（更远期）：多会话标签、`find_capability` 候选卡片、Agent 实时活动指示、更丰富的代码 diff 审查视图 | 更远期，仅占位 |
+| N1   | Agent 能力提升第一批：Leader 的会话级对话记忆（`core/react_engine.py` 的 `run()` 加一个调用方自己维护的可选 `history`）+ 为此新增的 GUI 侧并发防护 + 永不过滤的 `find_capability` 内部搜索 + 引导先列步骤再动手的 system prompt 微调 | ✅ 已完成 |
+| N2   | Agent 能力提升第二批（backlog，未开始）：推送式长期记忆（自动摘要最近的 `remember_fact` 内容，而不是完全依赖模型自己调用 `recall_facts`） | 暂缓，未来路标 |
+| N4/N7 | Agent 能力提升第三批（backlog，未开始）：`max_turns` 优雅降级（保留已完成的部分进度，而不是裸崩溝）+ 任务中途可取消 | 暂缓，未来路标 |
+| N8   | 主动性（backlog，未开始）：主动推送提醒/定时检查，而不是只在被问到时才响应——backlog 里改动面最大的一项，特意没跟其他小修小补捆在一起 | 暂缓，未来路标 |
+| N5/N9 | 可靠性/可观测性（backlog，未开始）：网络类工具的重试+退避；基于已有 JSONL 日志的 token 用量/延迟可观测性 | 暂缓，未来路标 |
+| N6   | 评测基线（backlog，未开始）：一组有代表性的真实多步骤任务集，用来衡量后续改动是否真的提升了实际任务完成质量，而不只是通过单元测试 | 暂缓，未来路标 |
+| E    | 其他编排模式、Google Calendar OAuth、A2A 协议对外互通                                               | 更远期，仅占位 |

@@ -3,7 +3,18 @@ core/react_engine.py deterministically without hitting a real API.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+from core.logger import AuraLogger, JSONLSink
 from core.message_types import ConversationTurn, LLMResponse
+
+
+def make_test_logger(tmp_path: Path) -> AuraLogger:
+    """AuraLogger([JSONLSink(tmp_path)]) — the common "just needs a working
+    logger, don't care about terminal output" test setup, factored out
+    since AuraLogger's constructor takes a list of LogSinks (see
+    core/logger.py) rather than a bare directory path."""
+    return AuraLogger([JSONLSink(tmp_path)])
 
 
 class FakeLLMProvider:

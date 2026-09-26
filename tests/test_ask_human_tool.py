@@ -8,15 +8,15 @@ from __future__ import annotations
 import pytest
 
 from confirmation.terminal_channel import TerminalConfirmationChannel
-from tests.fakes import FakeConfirmationChannel
+from tests.fakes import FakeConfirmationChannel, make_test_logger
 from tools.human.ask_human_tool import register_ask_human_tools
 from tools.registry import ToolRegistry
 
 
-def test_terminal_confirmation_channel_still_instantiates():
+def test_terminal_confirmation_channel_still_instantiates(tmp_path):
     # Would raise TypeError if TerminalConfirmationChannel hadn't implemented
     # the new abstract method ask_open_question().
-    TerminalConfirmationChannel()
+    TerminalConfirmationChannel(make_test_logger(tmp_path))
 
 
 @pytest.mark.asyncio

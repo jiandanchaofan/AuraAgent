@@ -3,6 +3,19 @@
 already-installed match, search the official MCP registry, and search
 SkillsMP (a third-party aggregator of public GitHub SKILL.md files).
 
+search_internal() (Epic N1/N3) never hides a candidate — it ranks by
+keyword overlap but always returns every eligible tool, because a wording
+mismatch between the caller's `intent` and a tool's own name/description
+is exactly the case a human would still want surfaced. Pre-filtering by
+"score > 0" used to silently drop anything that didn't share a keyword
+with `intent` — including, as a real bug this fixed, EVERY Chinese-language
+intent, since `re.findall(r"[a-z0-9]+", ...)` extracts zero words from
+non-ASCII text, so `words` was always empty and the old code returned `[]`
+outright. Handing the LLM the full list (name+description, cheap at this
+project's current tool count) and letting it judge relevance itself is
+more robust than a second, weaker keyword matcher trying to pre-decide
+what the model gets to see.
+
 Each external search function NEVER raises — a network hiccup, timeout, or
 unexpected response from one source returns an empty candidate list plus
 an error string instead of blowing up the whole find_capability call, so
@@ -76,14 +89,17 @@ class SkillCandidate:
 
 
 def search_internal(registry: ToolRegistry, caller_view: ScopedToolRegistryView, intent: str) -> list[InternalCandidate]:
-    """Keyword match over EVERY tool in the shared registry (not just the
-    caller's own capability-filtered subset) — the whole point is to
-    surface something already installed but not yet granted to the caller.
-    Plain case-insensitive substring/word overlap, same dependency-light
-    style as MemoryStore.search_facts()/notes search — no embeddings."""
+    """Every eligible tool in the shared registry (not just the caller's own
+    capability-filtered subset — the whole point is to surface something
+    already installed but not yet granted to the caller), ranked by plain
+    case-insensitive keyword overlap with `intent` but NEVER filtered by
+    it: a zero-overlap tool still comes back, just ordered last, so a
+    wording mismatch (or an intent with no extractable ASCII words at all,
+    e.g. Chinese) never silently hides a real match from the caller (an
+    LLM, which can judge relevance itself far better than this scorer
+    can). Same dependency-light style as MemoryStore.search_facts()/notes
+    search — no embeddings, just `re`."""
     words = [w for w in re.findall(r"[a-z0-9]+", intent.lower()) if len(w) > 2]
-    if not words:
-        return []
 
     scored: list[tuple[int, Any]] = []
     for spec in registry.get_tool_specs():
@@ -91,13 +107,12 @@ def search_internal(registry: ToolRegistry, caller_view: ScopedToolRegistryView,
             continue
         haystack = f"{spec.name} {spec.description}".lower()
         score = sum(1 for word in words if word in haystack)
-        if score:
-            scored.append((score, spec))
+        scored.append((score, spec))
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [
         InternalCandidate(name=spec.name, description=spec.description, already_allowed=caller_view.is_allowed(spec.name))
-        for _, spec in scored[:5]
+        for _, spec in scored
     ]
 
 

@@ -9,10 +9,9 @@ import pytest
 
 from agents.agent_definition import AgentDefinition
 from agents.delegate_tool import build_delegate_tool
-from core.logger import AuraLogger
 from core.message_types import LLMResponse
 from core.react_engine import AsyncReActEngine
-from tests.fakes import FakeLLMProvider
+from tests.fakes import FakeLLMProvider, make_test_logger
 from tools.registry import ToolRegistry
 
 
@@ -25,7 +24,7 @@ def _worker_def(name="researcher", capabilities=("fetch_url",)) -> AgentDefiniti
 def test_spec_name_and_schema(tmp_path):
     worker = _worker_def()
     fake_provider = FakeLLMProvider([])
-    worker_engine = AsyncReActEngine(fake_provider, ToolRegistry(), AuraLogger(tmp_path), "sys")
+    worker_engine = AsyncReActEngine(fake_provider, ToolRegistry(), make_test_logger(tmp_path), "sys")
     registered = build_delegate_tool(worker, worker_engine)
 
     assert registered.spec.name == "delegate_to_researcher"
@@ -39,7 +38,7 @@ async def test_handler_runs_the_worker_engine_and_returns_its_final_answer(tmp_p
     worker_provider = FakeLLMProvider(
         [LLMResponse(thought_text="The answer is 42.", tool_calls=[], stop_reason="end_turn", raw_provider_message=[])]
     )
-    worker_engine = AsyncReActEngine(worker_provider, ToolRegistry(), AuraLogger(tmp_path), "sys", agent_name="researcher")
+    worker_engine = AsyncReActEngine(worker_provider, ToolRegistry(), make_test_logger(tmp_path), "sys", agent_name="researcher")
     registered = build_delegate_tool(_worker_def(), worker_engine)
 
     result = await registered.handler({"task": "what is 6*7?"})

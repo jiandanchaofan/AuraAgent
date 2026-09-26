@@ -8,6 +8,7 @@ main.py's composition).
 from __future__ import annotations
 
 from agents.orchestration_mode import OrchestrationMode
+from core.message_types import ConversationTurn
 from core.react_engine import AsyncReActEngine
 
 
@@ -15,5 +16,5 @@ class LeaderWorkerOrchestrator(OrchestrationMode):
     def __init__(self, leader_engine: AsyncReActEngine) -> None:
         self._leader_engine = leader_engine
 
-    async def run(self, user_input: str) -> str:
-        return await self._leader_engine.run(user_input)
+    async def run(self, user_input: str, history: list[ConversationTurn] | None = None) -> str:
+        return await self._leader_engine.run(user_input, history=history)

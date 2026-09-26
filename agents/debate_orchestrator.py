@@ -20,11 +20,12 @@ from __future__ import annotations
 
 from agents.agent_registry import AgentRegistry
 from agents.orchestration_mode import OrchestrationMode
+from core.message_types import ConversationTurn
 
 
 class DebateOrchestrator(OrchestrationMode):
     def __init__(self, agent_registry: AgentRegistry) -> None:
         self._agent_registry = agent_registry
 
-    async def run(self, user_input: str) -> str:
+    async def run(self, user_input: str, history: list[ConversationTurn] | None = None) -> str:
         raise NotImplementedError("DebateOrchestrator is not implemented yet — see module docstring.")

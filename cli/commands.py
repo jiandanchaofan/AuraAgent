@@ -10,9 +10,16 @@ propose_new_agent/propose_mcp_server) — same underlying capabilities
 human instead of proposed by the LLM and reviewed by a human. Commands
 here therefore skip the "structural pre-check -> human review" step those
 tools have (the human typing the command already IS the reviewer), but
-still reuse the exact same construction/persistence helpers
-(agents/agent_builder.py, agents/agent_config_writer.py,
-mcp_integration/mcp_config_writer.py) so both channels stay consistent.
+still reuse the exact same construction/persistence helpers via
+cli/service.py (agents/agent_builder.py, agents/agent_config_writer.py,
+skills/skill_package.py) so both channels stay consistent.
+
+Every handler here is deliberately thin: it collects input (input()/
+getpass()), calls a cli/service.py function to do the actual work, and
+prints the result — the "how do I ask/display" half of each command.
+gui/routes.py (Epic M3) is the GUI's counterpart, calling the exact same
+cli/service.py functions for its "how do I ask/display over HTTP" half —
+see that module's docstring, and cli/service.py's, for the split.
 
 Nothing here ever touches core/react_engine.py, the LLM, or
 logs/session-*.jsonl — this is why /config set-key is safe: an API key
@@ -22,21 +29,13 @@ passed through anything that logs or shows content to the LLM.
 from __future__ import annotations
 
 import getpass
-from pathlib import Path
-from typing import Any
 
-from dotenv import set_key
-
-from agents.agent_builder import build_worker, ensure_worker_name_available
-from agents.agent_config_writer import add_agent_entry, add_capability, remove_agent_entry
-from agents.agent_definition import AgentDefinition, AgentDefinitionError
+from agents.agent_definition import AgentDefinitionError
 from agents.agent_registry import AgentRegistryError
+from cli import service
 from cli.context import CLIContext
-from providers.anthropic_provider import AnthropicProvider
-from providers.openai_provider import OpenAIProvider
-from skills.skill_package import SkillPackageError, extract_skill_files, finalize_skill_install, stage_skill_install
-
-_ENV_KEY_BY_PROVIDER = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+from skills.skill_package import SkillPackageError
+from skills.skill_schema import SkillManifestError
 
 _HELP_TEXT = """\
 Available commands:
@@ -86,59 +85,29 @@ async def dispatch_command(line: str, ctx: CLIContext) -> None:
 
 async def _cmd_config(args: list[str], ctx: CLIContext) -> None:
     if not args:
-        _config_show(ctx)
+        status = service.get_config_status(ctx)
+        print(f"provider={status.provider} model={status.model} key={status.key_masked}")
     elif args[0] == "use" and len(args) >= 3:
-        _config_use(args[1], args[2], ctx)
+        try:
+            service.switch_provider(args[1], args[2], ctx)
+        except ValueError as exc:
+            print(str(exc))
+            return
+        print(f"Switched to provider={args[1]} model={args[2]}.")
     elif args[0] == "set-key" and len(args) >= 2:
-        _config_set_key(args[1], ctx)
+        provider_name = args[1]
+        if provider_name not in service.KNOWN_PROVIDERS:
+            print(f"Unknown provider '{provider_name}' — expected 'anthropic' or 'openai'.")
+            return
+        value = getpass.getpass(f"Enter API key for '{provider_name}' (input hidden): ")
+        try:
+            service.set_api_key(provider_name, value, ctx)
+        except ValueError as exc:
+            print(str(exc))
+            return
+        print(f"Saved. Run '/config use {provider_name} <model_id>' to switch to it now.")
     else:
         print("Usage: /config | /config use <anthropic|openai> <model_id> | /config set-key <anthropic|openai>")
-
-
-def _mask_key(key: str) -> str:
-    if len(key) <= 4:
-        return "(not set)" if not key else "***"
-    return f"{key[:2]}...{key[-2:]}"
-
-
-def _config_show(ctx: CLIContext) -> None:
-    name = ctx.provider.provider_name
-    model = ctx.provider.model_name
-    key = ctx.known_api_keys.get(name, "")
-    print(f"provider={name} model={model} key={_mask_key(key)}")
-
-
-def _config_use(provider_name: str, model_id: str, ctx: CLIContext) -> None:
-    if provider_name not in _ENV_KEY_BY_PROVIDER:
-        print(f"Unknown provider '{provider_name}' — expected 'anthropic' or 'openai'.")
-        return
-    api_key = ctx.known_api_keys.get(provider_name, "")
-    if not api_key:
-        print(f"No API key known for '{provider_name}' yet — run '/config set-key {provider_name}' first.")
-        return
-
-    new_provider: Any
-    if provider_name == "anthropic":
-        new_provider = AnthropicProvider(api_key=api_key, model=model_id)
-    else:
-        new_provider = OpenAIProvider(api_key=api_key, model=model_id, base_url=ctx.settings.openai_base_url)
-    ctx.provider.set_current(new_provider, provider_name)
-    print(f"Switched to provider={provider_name} model={model_id}.")
-
-
-def _config_set_key(provider_name: str, ctx: CLIContext) -> None:
-    if provider_name not in _ENV_KEY_BY_PROVIDER:
-        print(f"Unknown provider '{provider_name}' — expected 'anthropic' or 'openai'.")
-        return
-
-    value = getpass.getpass(f"Enter API key for '{provider_name}' (input hidden): ").strip()
-    if not value:
-        print("Empty key — nothing changed.")
-        return
-
-    ctx.known_api_keys[provider_name] = value
-    set_key(str(ctx.env_file_path), _ENV_KEY_BY_PROVIDER[provider_name], value)
-    print(f"Saved. Run '/config use {provider_name} <model_id>' to switch to it now.")
 
 
 # --- /agents -----------------------------------------------------------------
@@ -159,10 +128,8 @@ async def _cmd_agents(rest: str, ctx: CLIContext) -> None:
 
 
 def _agents_list(ctx: CLIContext) -> None:
-    leader = ctx.agent_registry.leader
-    print(f"- {leader.name} (leader): {', '.join(leader.capabilities)}")
-    for worker in ctx.agent_registry.workers:
-        print(f"- {worker.name} (worker): {', '.join(worker.capabilities)}")
+    for agent in service.list_agents(ctx):
+        print(f"- {agent.name} ({agent.role}): {', '.join(agent.capabilities)}")
 
 
 async def _agents_add(ctx: CLIContext) -> None:
@@ -172,12 +139,10 @@ async def _agents_add(ctx: CLIContext) -> None:
     capabilities = [c.strip() for c in caps_raw.split(",") if c.strip()]
 
     try:
-        new_agent = AgentDefinition(name=name, role="worker", system_prompt=system_prompt, capabilities=capabilities)
+        agent_def = service.validate_new_agent(name, system_prompt, capabilities, ctx)
     except AgentDefinitionError as exc:
         print(f"Invalid agent definition: {exc}")
         return
-    try:
-        ensure_worker_name_available(name, ctx.agent_registry, ctx.registry)
     except ValueError as exc:
         print(str(exc))
         return
@@ -189,25 +154,16 @@ async def _agents_add(ctx: CLIContext) -> None:
         print("Cancelled.")
         return
 
-    delegate_tool = build_worker(new_agent, ctx.registry, ctx.provider, ctx.logger, ctx.max_turns)
-    ctx.leader_view.add_extra_tool(delegate_tool)
-    ctx.agent_registry.add_worker(new_agent)
-    await add_agent_entry(
-        ctx.settings.agents_config_path,
-        {"name": name, "role": "worker", "system_prompt": system_prompt, "capabilities": capabilities},
-        ctx.agents_config_lock,
-    )
+    await service.commit_new_agent(agent_def, ctx)
     print(f"Added agent '{name}'. delegate_to_{name} is now available, and persists across restarts.")
 
 
 async def _agents_remove(name: str, ctx: CLIContext) -> None:
     try:
-        ctx.agent_registry.remove_worker(name)
+        await service.remove_agent(name, ctx)
     except AgentRegistryError as exc:
         print(str(exc))
         return
-    ctx.leader_view.remove_extra_tool(f"delegate_to_{name}")
-    await remove_agent_entry(ctx.settings.agents_config_path, name, ctx.agents_config_lock)
     print(f"Removed agent '{name}'.")
 
 
@@ -229,44 +185,41 @@ async def _cmd_skills(rest: str, ctx: CLIContext) -> None:
 
 
 def _skills_list(ctx: CLIContext) -> None:
-    specs_by_name = {s.name: s for s in ctx.registry.get_tool_specs()}
-    for name in ctx.skill_loader.registered_skill_names:
-        spec = specs_by_name.get(name)
-        print(f"- {name}: {spec.description if spec else '(unknown)'}")
+    for skill in service.list_skills(ctx):
+        print(f"- {skill.name}: {skill.description}")
 
 
 async def _skills_load(url: str, ctx: CLIContext) -> None:
-    if not (url.startswith("http://") or url.startswith("https://")):
-        print("Only http:// and https:// URLs are supported.")
-        return
     try:
-        response = await ctx.http_client.get(url, timeout=15.0)
-        response.raise_for_status()
-    except Exception as exc:  # noqa: BLE001 - report to the human, don't crash the REPL
+        staged = await service.stage_skill_from_url(url, ctx)
+    except ValueError as exc:
+        print(str(exc))
+        return
+    except (SkillPackageError, SkillManifestError) as exc:
+        print(f"Rejected: {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001 - a network/HTTP failure, report to the human
         print(f"Download failed: {exc}")
         return
-    await _install_skill_package(response.content, ctx)
+    await _review_and_install(staged, ctx)
 
 
 async def _skills_install(local_path: str, ctx: CLIContext) -> None:
-    path = Path(local_path)
-    if not path.is_file():
-        print(f"No such file: '{local_path}'")
-        return
-    await _install_skill_package(path.read_bytes(), ctx)
-
-
-async def _install_skill_package(data: bytes, ctx: CLIContext) -> None:
     try:
-        skill_md_text, run_py_text = extract_skill_files(data)
-        staged = stage_skill_install(skill_md_text, run_py_text, ctx.settings.skills_dir, ctx.registry)
-    except SkillPackageError as exc:
+        staged = service.stage_skill_from_path(local_path, ctx)
+    except FileNotFoundError as exc:
+        print(str(exc))
+        return
+    except (SkillPackageError, SkillManifestError) as exc:
         print(f"Rejected: {exc}")
         return
     except Exception as exc:  # noqa: BLE001 - a bad manifest, surfaced plainly
         print(f"Invalid skill package: {exc}")
         return
+    await _review_and_install(staged, ctx)
 
+
+async def _review_and_install(staged, ctx: CLIContext) -> None:
     print(f"\n--- SKILL.md ---\n{staged.skill_md_text}")
     print(f"--- run.py ---\n{staged.run_py_text}\n--- end of code ---")
     if staged.warnings:
@@ -282,13 +235,8 @@ async def _install_skill_package(data: bytes, ctx: CLIContext) -> None:
         return
 
     try:
-        registered_name = finalize_skill_install(staged, ctx.skill_loader)
+        registered_name = await service.commit_skill(staged, ctx)
     except Exception as exc:  # noqa: BLE001 - a registration failure, surfaced plainly
         print(f"Failed to install: {exc}")
         return
-
-    ctx.leader_view.add_allowed_pattern(registered_name)
-    await add_capability(
-        ctx.settings.agents_config_path, ctx.agent_registry.leader.name, registered_name, ctx.agents_config_lock
-    )
     print(f"Installed and loaded skill '{registered_name}'. It persists across restarts.")

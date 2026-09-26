@@ -9,7 +9,12 @@ pyfiglet>=1.0
 httpx>=0.27
 mcp>=2.0
 python-pptx>=1.0  # used by skills_store/make_pptx (a self-extension-generated skill)
+fastapi>=0.115  # gui/ backend — shared composition root (core/bootstrap.py) served over a WebSocket
+uvicorn[standard]>=0.30  # ASGI server for gui/server.py; the [standard] extra brings websockets support
+pywebview>=5.0  # gui_app.py's desktop window (Epic M4) — wraps gui/server.py's app in a native OS WebView
 
 # --- dev / test only ---
 pytest>=8.0
 pytest-asyncio>=0.23
+# httpx (already a main dependency above) also doubles as FastAPI's own
+# recommended test client via httpx.ASGITransport — no extra package needed.

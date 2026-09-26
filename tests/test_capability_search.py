@@ -81,7 +81,7 @@ def _spec(name: str, description: str = "") -> ToolSpec:
 # --- search_internal ---------------------------------------------------------
 
 
-def test_search_internal_matches_by_keyword_in_name_or_description():
+def test_search_internal_ranks_keyword_matches_first_but_keeps_everything():
     registry = ToolRegistry()
     registry.register(_spec("market_new_products", "Research new product launches in a market segment"), _handler)
     registry.register(_spec("calculate", "Evaluate a math expression"), _handler)
@@ -89,9 +89,9 @@ def test_search_internal_matches_by_keyword_in_name_or_description():
 
     results = search_internal(registry, view, "I need to research new products in a market")
 
-    names = {c.name for c in results}
-    assert "market_new_products" in names
-    assert "calculate" not in names
+    names = [c.name for c in results]
+    assert names.index("market_new_products") < names.index("calculate")  # ranked first, not the only one
+    assert "calculate" in names  # never hidden, just ranked lower -- see N3
 
 
 def test_search_internal_flags_already_allowed_vs_not():
@@ -120,21 +120,31 @@ def test_search_internal_excludes_self_extension_and_delegate_tools():
     assert results == []
 
 
-def test_search_internal_returns_empty_for_no_match():
+def test_search_internal_never_hides_a_zero_keyword_overlap_tool():
+    # N3: a wording mismatch must never make a real, already-installed
+    # tool invisible -- the LLM should get to judge relevance itself
+    # rather than a weak keyword scorer silently filtering it out.
     registry = ToolRegistry()
     registry.register(_spec("calculate", "math"), _handler)
     view = ScopedToolRegistryView(registry, ["*"])
 
-    assert search_internal(registry, view, "quantum teleportation") == []
+    results = search_internal(registry, view, "quantum teleportation")
+
+    assert [c.name for c in results] == ["calculate"]
 
 
-def test_search_internal_ignores_short_words_and_empty_intent():
+def test_search_internal_returns_everything_for_short_words_empty_or_non_ascii_intent():
+    # Also covers the real bug N3 fixed: re.findall(r"[a-z0-9]+", ...)
+    # extracts zero words from Chinese text, so `words` used to be empty
+    # and the old code returned [] outright for every Chinese-language
+    # intent -- it must now fall back to returning everything, unordered
+    # by score, rather than nothing.
     registry = ToolRegistry()
     registry.register(_spec("calculate", "math"), _handler)
     view = ScopedToolRegistryView(registry, ["*"])
 
-    assert search_internal(registry, view, "a to is") == []
-    assert search_internal(registry, view, "") == []
+    for intent in ("a to is", "", "帮我计算一个数学表达式"):
+        assert [c.name for c in search_internal(registry, view, intent)] == ["calculate"]
 
 
 # --- search_mcp_registry ------------------------------------------------------

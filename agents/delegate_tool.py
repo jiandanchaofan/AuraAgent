@@ -10,11 +10,16 @@ imports this module or anything else from agents/.
 
 The Worker's AsyncReActEngine is built ONCE in main.py and passed in here
 already-constructed — never built fresh per call. This is safe (not just
-cheaper) because AsyncReActEngine.run() builds its `history` as a local
-variable fresh every call and touches no other `self` state, so multiple
-concurrent delegate_to_<worker> calls (or separate calls to different
-workers) safely share the same pre-built engine instances with no
-cross-talk — see core/react_engine.py's concurrent tool dispatch, which is
+cheaper) because the handler below calls `run(args["task"])` with no
+`history` argument, so AsyncReActEngine.run() builds a fresh, empty one
+locally every call (see its docstring) and touches no other `self` state
+— multiple concurrent delegate_to_<worker> calls (or separate calls to
+different workers) safely share the same pre-built engine instances with
+no cross-talk. This is deliberate, not an oversight: Epic N1 gave the
+Leader's OWN top-level calls persistent, caller-supplied history for
+cross-turn memory, but Workers stay one-shot and stateless specifically
+because they can run concurrently — a shared mutable history list would
+race. See core/react_engine.py's concurrent tool dispatch, which is
 exactly what makes calling two different workers in one Leader turn run
 in parallel rather than queued.
 """

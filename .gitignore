@@ -12,9 +12,14 @@ sandbox/tasks/*
 !sandbox/tasks/.gitkeep
 sandbox/memory/*
 !sandbox/memory/.gitkeep
+sandbox/workspace/*
+!sandbox/workspace/.gitkeep
 
 logs/*
 !logs/.gitkeep
 
 .pytest_cache/
 *.egg-info/
+
+gui/frontend/node_modules/
+gui/static/

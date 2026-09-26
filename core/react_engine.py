@@ -43,13 +43,27 @@ class AsyncReActEngine:
         self.max_turns = max_turns
         self.agent_name = agent_name
 
-    async def run(self, user_input: str) -> str:
+    async def run(self, user_input: str, history: list[ConversationTurn] | None = None) -> str:
         """Run one ReAct task to completion: repeatedly call the LLM, dispatch
         any tools it asks for, feed the Observations back, until it produces a
         final answer (stop_reason != "tool_use") or max_turns is exceeded.
+
+        `history` is mutated in place (only ever appended to, never
+        reassigned) and left holding every turn from this call when it
+        returns — pass the SAME list back into the next call to get
+        persistent, cross-turn memory (main.py's REPL and gui/server.py's
+        per-connection handler both do this for the Leader). Omit it (the
+        default) for a one-shot, stateless call that starts from nothing
+        and discards its history on return — this is what
+        agents/delegate_tool.py's worker invocations rely on: multiple
+        concurrent delegate_to_<worker> calls safely share the same
+        pre-built Worker engine instance specifically because each call
+        gets its own fresh list here, never a shared mutable one.
         """
         self.logger.log_user_input(user_input, agent_name=self.agent_name)
-        history: list[ConversationTurn] = [ConversationTurn(role="user", text=user_input)]
+        if history is None:
+            history = []
+        history.append(ConversationTurn(role="user", text=user_input))
 
         for turn_index in range(1, self.max_turns + 1):
             tool_specs = self.registry.get_tool_specs()

@@ -14,13 +14,11 @@ from agents.agent_registry import AgentRegistry
 from agents.agent_definition import AgentDefinition
 from agents.scoped_tool_registry import ScopedToolRegistryView
 from core.exceptions import ToolExecutionError
-from core.logger import AuraLogger
 from core.message_types import LLMResponse
-from tests.fakes import FakeConfirmationChannel, FakeLLMProvider
+from tests.fakes import FakeConfirmationChannel, FakeLLMProvider, make_test_logger
 from tools.base import ToolSpec
 from tools.registry import ToolRegistry
 from tools.self_extend.propose_agent_tool import register_propose_agent_tool
-
 
 def _write_agents_config(tmp_path: Path) -> Path:
     path = tmp_path / "agents.json"
@@ -30,10 +28,8 @@ def _write_agents_config(tmp_path: Path) -> Path:
     )
     return path
 
-
 async def _calc_handler(args):
     return str(args.get("a", 0) + args.get("b", 0))
-
 
 def _setup(tmp_path, decision: bool = True):
     registry = ToolRegistry()
@@ -46,7 +42,7 @@ def _setup(tmp_path, decision: bool = True):
     provider = FakeLLMProvider(
         [LLMResponse(thought_text="done", tool_calls=[], stop_reason="end_turn", raw_provider_message=[])]
     )
-    logger = AuraLogger(tmp_path / "logs")
+    logger = make_test_logger(tmp_path / "logs")
     config_path = _write_agents_config(tmp_path)
     lock = asyncio.Lock()
     confirmation = FakeConfirmationChannel(decision=decision)
@@ -57,7 +53,6 @@ def _setup(tmp_path, decision: bool = True):
     )
     return registry, agent_registry, leader_view, confirmation, config_path
 
-
 def _valid_args(name: str = "analyst") -> dict:
     return {
         "name": name,
@@ -65,7 +60,6 @@ def _valid_args(name: str = "analyst") -> dict:
         "capabilities": ["calculate"],
         "reason": "No existing worker synthesizes findings.",
     }
-
 
 @pytest.mark.asyncio
 async def test_approval_adds_worker_and_hot_registers_delegate_tool(tmp_path):
@@ -84,7 +78,6 @@ async def test_approval_adds_worker_and_hot_registers_delegate_tool(tmp_path):
     names = {a["name"] for a in saved["agents"]}
     assert names == {"orchestrator", "analyst"}
 
-
 @pytest.mark.asyncio
 async def test_decline_makes_no_changes(tmp_path):
     registry, agent_registry, leader_view, confirmation, config_path = _setup(tmp_path, decision=False)
@@ -98,7 +91,6 @@ async def test_decline_makes_no_changes(tmp_path):
     saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert [a["name"] for a in saved["agents"]] == ["orchestrator"]
 
-
 @pytest.mark.asyncio
 async def test_invalid_name_rejected_before_bothering_the_human(tmp_path):
     registry, agent_registry, leader_view, confirmation, config_path = _setup(tmp_path, decision=True)
@@ -107,7 +99,6 @@ async def test_invalid_name_rejected_before_bothering_the_human(tmp_path):
         await registry.dispatch("propose_new_agent", _valid_args(name="not a valid name!"))
 
     assert confirmation.requests == []
-
 
 @pytest.mark.asyncio
 async def test_name_colliding_with_existing_agent_rejected_before_bothering_the_human(tmp_path):
@@ -118,7 +109,6 @@ async def test_name_colliding_with_existing_agent_rejected_before_bothering_the_
 
     assert confirmation.requests == []
 
-
 @pytest.mark.asyncio
 async def test_name_colliding_with_existing_delegate_tool_rejected_before_bothering_the_human(tmp_path):
     registry, agent_registry, leader_view, confirmation, config_path = _setup(tmp_path, decision=True)
@@ -128,7 +118,6 @@ async def test_name_colliding_with_existing_delegate_tool_rejected_before_bother
         await registry.dispatch("propose_new_agent", _valid_args(name="analyst"))
 
     assert len(confirmation.requests) == 1  # the second attempt never asked
-
 
 @pytest.mark.asyncio
 async def test_role_is_always_worker_even_if_a_leader_role_were_smuggled_in(tmp_path):
@@ -142,7 +131,6 @@ async def test_role_is_always_worker_even_if_a_leader_role_were_smuggled_in(tmp_
 
     assert agent_registry.get("analyst").role == "worker"
 
-
 @pytest.mark.asyncio
 async def test_proposal_shown_to_human_resolves_capability_patterns_to_real_tools(tmp_path):
     registry, agent_registry, leader_view, confirmation, config_path = _setup(tmp_path, decision=False)
@@ -154,7 +142,6 @@ async def test_proposal_shown_to_human_resolves_capability_patterns_to_real_tool
     reason = confirmation.requests[0].reason
     assert "'calculate' -> calculate" in reason
     assert "'*nonexistent*' -> (matches no currently-registered tool)" in reason
-
 
 @pytest.mark.asyncio
 async def test_empty_capabilities_rejected_before_bothering_the_human(tmp_path):

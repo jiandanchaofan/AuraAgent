@@ -12,10 +12,9 @@ from agents.agent_definition import AgentDefinition
 from agents.delegate_tool import build_delegate_tool
 from agents.leader_worker_orchestrator import LeaderWorkerOrchestrator
 from agents.scoped_tool_registry import ScopedToolRegistryView
-from core.logger import AuraLogger
 from core.message_types import LLMResponse, ToolCallRequest
 from core.react_engine import AsyncReActEngine
-from tests.fakes import FakeLLMProvider
+from tests.fakes import FakeLLMProvider, make_test_logger
 from tools.base import ToolSpec
 from tools.registry import ToolRegistry
 
@@ -41,7 +40,7 @@ async def test_leader_delegates_to_worker_and_synthesizes_final_answer(tmp_path)
         create_task_handler,
     )
 
-    logger = AuraLogger(tmp_path)
+    logger = make_test_logger(tmp_path)
 
     worker_def = AgentDefinition(
         name="researcher", role="worker", system_prompt="research things", capabilities=["fetch_url"]
@@ -103,6 +102,32 @@ async def test_leader_delegates_to_worker_and_synthesizes_final_answer(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_run_forwards_history_to_the_leader_engine(tmp_path):
+    # Regression test: LeaderWorkerOrchestrator.run() is a thin wrapper
+    # around AsyncReActEngine.run() (Epic N1 gave that a `history` param)
+    # -- this caught a real bug where the wrapper didn't forward it at
+    # all, so main.py/gui/server.py's persistent history was silently
+    # dropped every time (a TypeError on the extra kwarg, in fact).
+    logger = make_test_logger(tmp_path)
+    leader_provider = FakeLLMProvider(
+        [
+            LLMResponse(thought_text="Nice to meet you!", tool_calls=[], stop_reason="end_turn", raw_provider_message=[]),
+            LLMResponse(thought_text="Your name is Xiaoming.", tool_calls=[], stop_reason="end_turn", raw_provider_message=[]),
+        ]
+    )
+    leader_engine = AsyncReActEngine(leader_provider, ToolRegistry(), logger, "orchestrate")
+    orchestrator = LeaderWorkerOrchestrator(leader_engine)
+    history: list = []
+
+    await orchestrator.run("My name is Xiaoming.", history=history)
+    await orchestrator.run("What's my name?", history=history)
+
+    second_call_history = leader_provider.sent_histories[1]
+    assert second_call_history[0].text == "My name is Xiaoming."
+    assert second_call_history[-1].text == "What's my name?"
+
+
+@pytest.mark.asyncio
 async def test_worker_cannot_reach_leader_only_tools_even_via_delegation(tmp_path):
     """The worker's view was built with capabilities=["fetch_url"] only —
     if its LLM (hallucinating or otherwise) tried to call create_task, the
@@ -119,7 +144,7 @@ async def test_worker_cannot_reach_leader_only_tools_even_via_delegation(tmp_pat
         create_task_handler,
     )
 
-    logger = AuraLogger(tmp_path)
+    logger = make_test_logger(tmp_path)
     worker_def = AgentDefinition(
         name="researcher", role="worker", system_prompt="research things", capabilities=["fetch_url"]
     )
