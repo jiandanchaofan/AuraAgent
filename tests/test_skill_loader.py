@@ -186,6 +186,120 @@ async def test_register_one_registers_a_single_directory_directly(tmp_path):
     assert "got:" in result
 
 
+@pytest.mark.asyncio
+async def test_workspace_root_is_injected_as_an_env_var_when_configured(tmp_path):
+    # Real bug this guards against: make_pptx (and any future skill that
+    # writes user-facing output files) needs to know where "the workspace"
+    # is, since its subprocess cwd is its OWN directory, not that -- see
+    # skill_loader.py's module docstring.
+    workspace = tmp_path / "workspace"
+    store = tmp_path / "store"
+    _write_skill(
+        store,
+        "echo_workspace_root",
+        skill_md="---\nname: echo_workspace_root\ndescription: echoes the env var\n---\nbody\n",
+        run_py="import argparse, os\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--args-json', required=True)\n"
+        "p.parse_args()\n"
+        "print(os.environ.get('AURA_WORKSPACE_ROOT', '(not set)'))\n",
+    )
+    registry = ToolRegistry()
+    loader = SkillLoader(store, registry, workspace_root=workspace)
+    loader.scan_and_register()
+
+    result = await registry.dispatch("echo_workspace_root", {})
+
+    assert result == str(workspace)
+
+
+@pytest.mark.asyncio
+async def test_workspace_root_env_var_is_absent_when_not_configured(tmp_path):
+    # Backward compatibility: every pre-existing caller (including the
+    # other tests in this file) that doesn't pass workspace_root at all
+    # must see no behavior change whatsoever.
+    _write_skill(
+        tmp_path,
+        "echo_workspace_root",
+        skill_md="---\nname: echo_workspace_root\ndescription: echoes the env var\n---\nbody\n",
+        run_py="import argparse, os\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--args-json', required=True)\n"
+        "p.parse_args()\n"
+        "print(os.environ.get('AURA_WORKSPACE_ROOT', '(not set)'))\n",
+    )
+    registry = ToolRegistry()
+    loader = SkillLoader(tmp_path, registry)
+    loader.scan_and_register()
+
+    result = await registry.dispatch("echo_workspace_root", {})
+
+    assert result == "(not set)"
+
+
+@pytest.mark.asyncio
+async def test_make_pptx_saves_within_the_workspace_root_not_its_own_skill_directory(tmp_path):
+    # Regression test for the real bug: make_pptx used to save relative to
+    # its own skills_store/make_pptx/ directory (the subprocess cwd),
+    # invisible to tools/files/file_tool.py's workspace-scoped tools, and
+    # crashed outright for any output_path with a subdirectory (python-pptx
+    # doesn't create missing parent directories).
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=workspace)
+    loader.scan_and_register()
+
+    result = await registry.dispatch(
+        "make_pptx",
+        {
+            "output_path": "reports/deck.pptx",  # a subdirectory that does not exist yet
+            "title": "Test Deck",
+            "slides": [{"title": "Slide One", "bullets": ["Point A", "Point B"]}],
+        },
+    )
+
+    saved_path = workspace / "reports" / "deck.pptx"
+    assert saved_path.is_file()
+    assert saved_path.stat().st_size > 1000  # a real .pptx zip archive, not an empty/error stub
+    assert "reports/deck.pptx" in result
+    # And it must NOT have landed next to run.py, the pre-fix location.
+    assert not (REAL_SKILLS_STORE / "make_pptx" / "reports").exists()
+
+
+@pytest.mark.asyncio
+async def test_make_pptx_rejects_a_path_traversal_output_path(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=workspace)
+    loader.scan_and_register()
+
+    with pytest.raises(ToolExecutionError) as exc_info:
+        await registry.dispatch(
+            "make_pptx",
+            {"output_path": "../escaped.pptx", "title": "x", "slides": []},
+        )
+    assert "outside the workspace sandbox" in str(exc_info.value)
+    assert not (tmp_path / "escaped.pptx").exists()
+
+
+@pytest.mark.asyncio
+async def test_make_pptx_rejects_an_absolute_output_path(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry()
+    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=workspace)
+    loader.scan_and_register()
+
+    absolute_target = tmp_path / "elsewhere.pptx"
+    with pytest.raises(ToolExecutionError) as exc_info:
+        await registry.dispatch(
+            "make_pptx",
+            {"output_path": str(absolute_target), "title": "x", "slides": []},
+        )
+    assert "Absolute paths are not allowed" in str(exc_info.value)
+    assert not absolute_target.exists()
+
+
 def test_register_one_raises_on_bad_manifest_instead_of_silently_skipping(tmp_path):
     """Unlike scan_and_register() (which logs-and-skips a bad skill),
     register_one() must propagate the error so propose_new_skill's caller

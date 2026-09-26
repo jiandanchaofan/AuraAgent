@@ -15,6 +15,21 @@ Python environment — same fix as mcp_integration/mcp_client_manager.py's.
 
 A skill that fails to parse or load is logged and skipped rather than
 aborting startup — same "optional, best-effort" posture as MCP servers.
+
+If `workspace_root` is given, every skill subprocess also gets an
+AURA_WORKSPACE_ROOT env var pointing at it — real, live use surfaced a bug
+where make_pptx (skills_store/make_pptx/run.py) saved a user-given
+`output_path` relative to its OWN directory (this module's documented
+`cwd=`, above) rather than the workspace the rest of the app's file tools
+(tools/files/file_tool.py) use, so a generated file was both unreachable
+by those tools and, for any path with a subdirectory, crashed outright
+(python-pptx doesn't create missing parent directories). A skill that
+writes user-facing output files is expected to read this env var itself
+and resolve/sandbox its own output path against it, the same way
+tools/files/file_tool.py resolves against its own workspace_root -- see
+make_pptx's run.py for the reference implementation. `workspace_root`
+defaults to None (no env var injected) so every existing caller/test that
+doesn't care about this keeps its exact prior behavior.
 """
 from __future__ import annotations
 
@@ -48,11 +63,18 @@ _SKILL_SUBPROCESS_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
 class SkillLoader:
     def __init__(
-        self, skills_dir: Path, registry: ToolRegistry, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+        self,
+        skills_dir: Path,
+        registry: ToolRegistry,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        workspace_root: Path | None = None,
     ) -> None:
         self._skills_dir = skills_dir
         self._registry = registry
         self._timeout_seconds = timeout_seconds
+        self._subprocess_env = dict(_SKILL_SUBPROCESS_ENV)
+        if workspace_root is not None:
+            self._subprocess_env["AURA_WORKSPACE_ROOT"] = str(workspace_root)
         # Tracks every skill name registered so far (scan_and_register() at
         # startup, plus any later register_one() call from propose_new_skill
         # or the /skills load|install CLI commands) — the shared
@@ -101,7 +123,7 @@ class SkillLoader:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(manifest.entrypoint.parent),
-                env=_SKILL_SUBPROCESS_ENV,
+                env=self._subprocess_env,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._timeout_seconds)

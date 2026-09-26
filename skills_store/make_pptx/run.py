@@ -1,9 +1,49 @@
 import argparse
 import json
+import os
+import sys
+from pathlib import Path
 
 from pptx import Presentation
 from pptx.util import Pt
 from pptx.oxml.ns import qn
+
+
+def resolve_output_path(raw_path: str) -> Path:
+    """Real bug this fixes: skills/skill_loader.py runs this script with its
+    OWN directory as the subprocess cwd (so a skill can reference its own
+    local files by relative path) -- that is NOT the workspace
+    tools/files/file_tool.py's tools operate on, so a plain
+    `prs.save(raw_path)` either landed the .pptx somewhere the rest of the
+    app could never find it, or (for any raw_path with a subdirectory)
+    crashed outright, since python-pptx does not create missing parent
+    directories itself.
+
+    skills/skill_loader.py injects AURA_WORKSPACE_ROOT into this process's
+    environment when the caller configured one (core/bootstrap.py always
+    does) -- mirrors tools/sandbox_path.py::resolve_within_sandbox()'s
+    exact security checks (reject an absolute path before ever joining it,
+    since Path(root) / "/etc/passwd" would silently discard `root`
+    entirely; reject anything that resolves outside the root after the
+    join) since a skill's run.py is a standalone script and must not import
+    back into the main package. With no AURA_WORKSPACE_ROOT set (e.g. this
+    script run standalone, or via a SkillLoader that didn't configure one),
+    falls back to the pre-fix behavior: `raw_path` as-is, relative to cwd.
+    """
+    workspace_root = os.environ.get("AURA_WORKSPACE_ROOT")
+    if not workspace_root:
+        return Path(raw_path)
+
+    root = Path(workspace_root).resolve()
+    if Path(raw_path).is_absolute():
+        print(f"Absolute paths are not allowed: '{raw_path}'", file=sys.stderr)
+        sys.exit(1)
+    candidate = (root / raw_path).resolve()
+    if not candidate.is_relative_to(root):
+        print(f"Path '{raw_path}' resolves outside the workspace sandbox ({root})", file=sys.stderr)
+        sys.exit(1)
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    return candidate
 
 
 def set_cjk(run, size, font, bold=False):
@@ -51,7 +91,8 @@ def main():
     for item in args["slides"]:
         add_slide(prs, 1, item["title"], item["bullets"], font, 30, 20)
 
-    prs.save(args["output_path"])
+    output_path = resolve_output_path(args["output_path"])
+    prs.save(str(output_path))
     print(f"已生成 {args['output_path']}（共 {len(prs.slides._sldIdLst)} 页）")
 
 
