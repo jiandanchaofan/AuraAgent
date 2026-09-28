@@ -34,18 +34,53 @@ class Settings(BaseSettings):
     fetch_url_max_bytes: int = Field(default=200_000, alias="AURA_FETCH_URL_MAX_BYTES")
     download_max_bytes: int = Field(default=50_000_000, alias="AURA_DOWNLOAD_MAX_BYTES")
     skill_timeout_seconds: float = Field(default=30.0, alias="AURA_SKILL_TIMEOUT_SECONDS")
+    clipboard_max_chars: int = Field(default=20_000, alias="AURA_CLIPBOARD_MAX_CHARS")
 
     # Fixed sandbox locations — not env-configurable in v1 so every tool's
     # blast radius is predictable regardless of how the process is launched.
     sandbox_root: Path = PROJECT_ROOT / "sandbox"
-    notes_sandbox_root: Path = PROJECT_ROOT / "sandbox" / "notes"
-    # The one exception to "not env-configurable": file_tool's general
+    # Like workspace_root below, meant to be pointed at a user's REAL notes
+    # directory (e.g. an Obsidian vault) via /notes set or AURA_NOTES_
+    # SANDBOX_ROOT — the boundary itself (resolve_within_sandbox()) still
+    # always applies, only its location is configurable.
+    notes_sandbox_root: Path = Field(
+        default=PROJECT_ROOT / "sandbox" / "notes", alias="AURA_NOTES_SANDBOX_ROOT"
+    )
+    # The other exception to "not env-configurable": file_tool's general
     # file-management tools (tools/files/) are meant to be pointed at a
     # user's REAL working directory, not just a repo-local sandbox — the
     # boundary itself (resolve_within_sandbox()) still always applies,
     # only its location is configurable.
     workspace_root: Path = Field(default=PROJECT_ROOT / "sandbox" / "workspace", alias="AURA_WORKSPACE_ROOT")
     calendar_events_file: Path = PROJECT_ROOT / "sandbox" / "calendar" / "events.json"
+    # "local" -> LocalJSONCalendarProvider (default) | "google" -> GoogleCalendarProvider.
+    # Deliberately NOT runtime-swappable via a CLI arg the way workspace_root/
+    # notes_sandbox_root are -- /calendar connect (cli/commands.py) flips this
+    # in .env itself once OAuth succeeds and hot-swaps the live provider via
+    # SwappableCalendarProvider, so a human never edits this by hand in the
+    # normal flow. See load_settings()'s validation below for what happens if
+    # someone does anyway.
+    calendar_backend: str = Field(default="local", alias="AURA_CALENDAR_BACKEND")
+    # google_client_secret_file: the OAuth "Desktop app" client JSON the user
+    # downloads themselves from Google Cloud Console (this project can't
+    # automate creating that project/OAuth client) -- /calendar connect reads
+    # it. google_token_file: written by /calendar connect after a successful
+    # authorization; both live under sandbox/calendar/, already gitignored.
+    google_client_secret_file: Path = PROJECT_ROOT / "sandbox" / "calendar" / "google_client_secret.json"
+    google_token_file: Path = PROJECT_ROOT / "sandbox" / "calendar" / "google_token.json"
+    # Project ("/project" -- cli/commands.py): projects_dir is where a new
+    # project's directory is auto-created when /project create doesn't get
+    # an explicit existing path; project_meta_dir holds each project's
+    # registry entry + summary, deliberately kept OUTSIDE any project's own
+    # directory (which stays pure user/model content) -- same config/ (app
+    # state) vs sandbox/ (user content) split used elsewhere in this project.
+    projects_dir: Path = PROJECT_ROOT / "sandbox" / "projects"
+    project_meta_dir: Path = PROJECT_ROOT / "sandbox" / "project_meta"
+    # Hard cap on ProjectSummary.current_state's length (update_project_summary
+    # truncates, it doesn't just hope the model stays brief) -- keeps a
+    # project's token cost roughly constant no matter how long it's been
+    # worked on. Same config pattern as clipboard_max_chars/fetch_url_max_bytes.
+    project_summary_max_chars: int = Field(default=4_000, alias="AURA_PROJECT_SUMMARY_MAX_CHARS")
     tasks_file: Path = PROJECT_ROOT / "sandbox" / "tasks" / "tasks.json"
     memory_file: Path = PROJECT_ROOT / "sandbox" / "memory" / "facts.json"
     user_profile_file: Path = PROJECT_ROOT / "sandbox" / "memory" / "user_profile.json"
@@ -78,5 +113,20 @@ def load_settings() -> Settings:
     else:
         raise RuntimeError(
             f"Unknown AURA_LLM_PROVIDER '{settings.llm_provider}' — expected 'anthropic' or 'openai'."
+        )
+
+    if settings.calendar_backend == "google":
+        if not settings.google_token_file.exists():
+            raise RuntimeError(
+                "AURA_CALENDAR_BACKEND=google but no Google token was found at "
+                f"'{settings.google_token_file}'. Run /calendar connect first while "
+                "AURA_CALENDAR_BACKEND is still 'local' (it switches to 'google' and "
+                "saves the token itself once authorization succeeds), then restart. "
+                "If you set this env var by hand, unset it (or set it back to 'local'), "
+                "restart, run /calendar connect, then restart again."
+            )
+    elif settings.calendar_backend != "local":
+        raise RuntimeError(
+            f"Unknown AURA_CALENDAR_BACKEND '{settings.calendar_backend}' — expected 'local' or 'google'."
         )
     return settings

@@ -57,6 +57,8 @@ def _test_settings(tmp_path) -> Settings:
         user_profile_file=tmp_path / "memory" / "user_profile.json",
         logs_dir=tmp_path / "logs",
         AURA_WORKSPACE_ROOT=tmp_path / "workspace",
+        projects_dir=tmp_path / "projects",
+        project_meta_dir=tmp_path / "project_meta",
         agents_config_path=agents_config_path,
         skills_dir=tmp_path / "skills_store",
         env_file_path=tmp_path / ".env",

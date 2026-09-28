@@ -28,6 +28,8 @@ def _test_settings(tmp_path) -> Settings:
         user_profile_file=tmp_path / "memory" / "user_profile.json",
         logs_dir=tmp_path / "logs",
         AURA_WORKSPACE_ROOT=tmp_path / "workspace",
+        projects_dir=tmp_path / "projects",
+        project_meta_dir=tmp_path / "project_meta",
         _env_file=None,
         # agents_config_path / mcp_config_path / skills_dir deliberately
         # left at their real project defaults, so this exercises the real
@@ -115,5 +117,25 @@ async def test_build_app_context_confirmation_channel_is_reused_everywhere(tmp_p
         await ctx.registry.dispatch("delete_file", {"path": "a.txt"})
         assert len(confirmation.requests) == 1
         assert isinstance(confirmation.requests[0], ConfirmationRequest)
+    finally:
+        await ctx.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_app_context_wires_project_support(tmp_path):
+    """project_store/active_project/leader_engine/base_leader_system_prompt
+    must all be present and consistent -- these are what cli/service.py's
+    use_project()/exit_project() and tools/projects/project_tool.py's
+    update_project_summary rely on to live-sync the Leader's prompt."""
+    logger = AuraLogger([_RecordingSink()])
+    confirmation = FakeConfirmationChannel(decision=True)
+
+    ctx = await build_app_context(_test_settings(tmp_path), confirmation, logger)
+    try:
+        assert ctx.active_project.current_slug is None
+        assert ctx.leader_engine.system_prompt == ctx.base_leader_system_prompt
+        assert ctx.cli_context.project_store is ctx.project_store
+        assert ctx.cli_context.leader_engine is ctx.leader_engine
+        assert "update_project_summary" in {s.name for s in ctx.leader_view.get_tool_specs()}
     finally:
         await ctx.aclose()

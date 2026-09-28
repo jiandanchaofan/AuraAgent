@@ -8,11 +8,12 @@ import pytest
 from core.exceptions import ToolExecutionError
 from tools.notes.notes_tool import register_notes_tools
 from tools.registry import ToolRegistry
+from tools.workspace_root import SwappableWorkspaceRoot
 
 
 @pytest.fixture
 def registry_and_sandbox(tmp_path):
-    sandbox = tmp_path / "notes"
+    sandbox = SwappableWorkspaceRoot(tmp_path / "notes")
     registry = ToolRegistry()
     register_notes_tools(registry, sandbox)
     return registry, sandbox

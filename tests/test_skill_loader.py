@@ -11,6 +11,7 @@ import pytest
 from core.exceptions import ToolExecutionError
 from tools.registry import ToolRegistry
 from skills.skill_loader import SkillLoader
+from tools.workspace_root import SwappableWorkspaceRoot
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REAL_SKILLS_STORE = PROJECT_ROOT / "skills_store"
@@ -204,7 +205,7 @@ async def test_workspace_root_is_injected_as_an_env_var_when_configured(tmp_path
         "print(os.environ.get('AURA_WORKSPACE_ROOT', '(not set)'))\n",
     )
     registry = ToolRegistry()
-    loader = SkillLoader(store, registry, workspace_root=workspace)
+    loader = SkillLoader(store, registry, workspace_root=SwappableWorkspaceRoot(workspace))
     loader.scan_and_register()
 
     result = await registry.dispatch("echo_workspace_root", {})
@@ -245,7 +246,7 @@ async def test_make_pptx_saves_within_the_workspace_root_not_its_own_skill_direc
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry = ToolRegistry()
-    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=workspace)
+    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=SwappableWorkspaceRoot(workspace))
     loader.scan_and_register()
 
     result = await registry.dispatch(
@@ -270,7 +271,7 @@ async def test_make_pptx_rejects_a_path_traversal_output_path(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry = ToolRegistry()
-    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=workspace)
+    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=SwappableWorkspaceRoot(workspace))
     loader.scan_and_register()
 
     with pytest.raises(ToolExecutionError) as exc_info:
@@ -287,7 +288,7 @@ async def test_make_pptx_rejects_an_absolute_output_path(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry = ToolRegistry()
-    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=workspace)
+    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=SwappableWorkspaceRoot(workspace))
     loader.scan_and_register()
 
     absolute_target = tmp_path / "elsewhere.pptx"

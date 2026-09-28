@@ -11,7 +11,6 @@ private/internal IP ranges or cloud metadata endpoints (e.g.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -22,6 +21,7 @@ from tools.base import ToolSpec
 from tools.registry import ToolRegistry
 from tools.sandbox_path import resolve_within_sandbox
 from tools.web.html_to_text import html_to_text
+from tools.workspace_root import SwappableWorkspaceRoot
 
 _ALLOWED_SCHEMES = {"http", "https"}
 _ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
@@ -114,7 +114,7 @@ def register_http_tools(
     http_client: httpx.AsyncClient,
     timeout_seconds: float,
     max_bytes: int,
-    workspace_root: Path,
+    workspace_root: SwappableWorkspaceRoot,
     download_max_bytes: int,
 ) -> None:
     """http_request and download_file — more general siblings of
@@ -124,11 +124,11 @@ def register_http_tools(
     rather than reading it as text. Same scheme allowlist/timeout
     conventions as fetch_url; download_file additionally routes its
     destination through tools/sandbox_path.resolve_within_sandbox() against
-    `workspace_root` — a download is still a write to local disk, so it
-    gets the exact same sandboxing tools/files/file_tool.py's writes do,
-    not an unrestricted path.
+    `workspace_root.current` (read fresh per call, not captured once — see
+    tools/workspace_root.py) — a download is still a write to local disk,
+    so it gets the exact same sandboxing tools/files/file_tool.py's writes
+    do, not an unrestricted path.
     """
-    workspace_root.mkdir(parents=True, exist_ok=True)
 
     async def http_request(args: dict[str, Any]) -> str:
         url = args["url"]
@@ -167,7 +167,7 @@ def register_http_tools(
         if scheme not in _ALLOWED_SCHEMES:
             raise ToolExecutionError(f"Unsupported URL scheme '{scheme}'. Only http/https are allowed.")
 
-        destination = resolve_within_sandbox(workspace_root, destination_rel)
+        destination = resolve_within_sandbox(workspace_root.current, destination_rel)
         destination.parent.mkdir(parents=True, exist_ok=True)
 
         try:

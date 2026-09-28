@@ -4,6 +4,11 @@
       "name": "example",
       "command": "python",
       "args": ["mcp_servers/example_server.py"]
+    },
+    {
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Docs\\AA"]
     }
   ]
 }

@@ -44,6 +44,7 @@ from core.exceptions import ToolExecutionError
 from skills.skill_schema import SkillManifest, SkillManifestError, parse_skill_manifest
 from tools.base import ToolSpec
 from tools.registry import ToolRegistry
+from tools.workspace_root import SwappableWorkspaceRoot
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
@@ -67,14 +68,16 @@ class SkillLoader:
         skills_dir: Path,
         registry: ToolRegistry,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-        workspace_root: Path | None = None,
+        workspace_root: SwappableWorkspaceRoot | None = None,
     ) -> None:
         self._skills_dir = skills_dir
         self._registry = registry
         self._timeout_seconds = timeout_seconds
-        self._subprocess_env = dict(_SKILL_SUBPROCESS_ENV)
-        if workspace_root is not None:
-            self._subprocess_env["AURA_WORKSPACE_ROOT"] = str(workspace_root)
+        #: Read fresh on every subprocess spawn (see _register_skill's
+        #: handler below), not baked into a fixed env dict at construction
+        #: time -- so /workspace set (cli/commands.py) takes effect on the
+        #: very next skill call, same reasoning as tools/files/file_tool.py.
+        self._workspace_root = workspace_root
         # Tracks every skill name registered so far (scan_and_register() at
         # startup, plus any later register_one() call from propose_new_skill
         # or the /skills load|install CLI commands) — the shared
@@ -115,6 +118,9 @@ class SkillLoader:
 
     def _register_skill(self, manifest: SkillManifest) -> None:
         async def handler(args: dict[str, Any]) -> str:
+            env = dict(_SKILL_SUBPROCESS_ENV)
+            if self._workspace_root is not None:
+                env["AURA_WORKSPACE_ROOT"] = str(self._workspace_root.current)
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
                 str(manifest.entrypoint),
@@ -123,7 +129,7 @@ class SkillLoader:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(manifest.entrypoint.parent),
-                env=self._subprocess_env,
+                env=env,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._timeout_seconds)

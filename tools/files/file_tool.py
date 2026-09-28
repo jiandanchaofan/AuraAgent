@@ -32,6 +32,7 @@ from core.exceptions import ToolExecutionError
 from tools.base import ToolSpec
 from tools.registry import ToolRegistry
 from tools.sandbox_path import resolve_within_sandbox
+from tools.workspace_root import SwappableWorkspaceRoot
 
 # A conservative guess at "this is probably not text" — read_file refuses
 # to decode these rather than dumping binary noise into the LLM's context
@@ -47,15 +48,18 @@ _LIKELY_BINARY_SUFFIXES = {
 
 def register_file_tools(
     registry: ToolRegistry,
-    workspace_root: Path,
+    workspace_root: SwappableWorkspaceRoot,
     confirmation_channel: ConfirmationChannel,
 ) -> None:
-    """Registers the eight file tools against `workspace_root`, creating it if needed."""
-    workspace_root.mkdir(parents=True, exist_ok=True)
+    """Registers the eight file tools against `workspace_root`. Every
+    handler below reads `workspace_root.current` fresh on each call
+    (never captures a Path once) so that /workspace set (cli/commands.py)
+    repointing the shared SwappableWorkspaceRoot takes effect immediately,
+    with no need to re-register these tools."""
 
     async def list_directory(args: dict[str, Any]) -> str:
         rel = args.get("path", "")
-        path = resolve_within_sandbox(workspace_root, rel)
+        path = resolve_within_sandbox(workspace_root.current, rel)
         if not path.is_dir():
             raise ToolExecutionError(f"Not a directory: '{rel}'")
         entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
@@ -70,7 +74,7 @@ def register_file_tools(
         return "\n".join(lines)
 
     async def read_file(args: dict[str, Any]) -> str:
-        path = resolve_within_sandbox(workspace_root, args["path"])
+        path = resolve_within_sandbox(workspace_root.current, args["path"])
         if not path.is_file():
             raise ToolExecutionError(f"File not found: '{args['path']}'")
         if path.suffix.lower() in _LIKELY_BINARY_SUFFIXES:
@@ -83,7 +87,7 @@ def register_file_tools(
             raise ToolExecutionError(f"'{args['path']}' is not a UTF-8 text file: {exc}") from exc
 
     async def write_file(args: dict[str, Any]) -> str:
-        path = resolve_within_sandbox(workspace_root, args["path"])
+        path = resolve_within_sandbox(workspace_root.current, args["path"])
         mode = args.get("mode", "create_only")
         if mode not in ("create_only", "overwrite"):
             raise ToolExecutionError(f"Unknown mode '{mode}' (expected 'create_only' or 'overwrite').")
@@ -94,7 +98,7 @@ def register_file_tools(
         return f"Wrote '{args['path']}' (mode={mode})."
 
     async def delete_file(args: dict[str, Any]) -> str:
-        path = resolve_within_sandbox(workspace_root, args["path"])
+        path = resolve_within_sandbox(workspace_root.current, args["path"])
         if not path.is_file():
             raise ToolExecutionError(f"File not found: '{args['path']}'")
 
@@ -112,8 +116,8 @@ def register_file_tools(
         return f"Deleted '{args['path']}'."
 
     async def move_file(args: dict[str, Any]) -> str:
-        source = resolve_within_sandbox(workspace_root, args["source"])
-        destination = resolve_within_sandbox(workspace_root, args["destination"])
+        source = resolve_within_sandbox(workspace_root.current, args["source"])
+        destination = resolve_within_sandbox(workspace_root.current, args["destination"])
         if not source.exists():
             raise ToolExecutionError(f"Source not found: '{args['source']}'")
         if destination.exists():
@@ -135,8 +139,8 @@ def register_file_tools(
         return f"Moved '{args['source']}' to '{args['destination']}'."
 
     async def copy_file(args: dict[str, Any]) -> str:
-        source = resolve_within_sandbox(workspace_root, args["source"])
-        destination = resolve_within_sandbox(workspace_root, args["destination"])
+        source = resolve_within_sandbox(workspace_root.current, args["source"])
+        destination = resolve_within_sandbox(workspace_root.current, args["destination"])
         if not source.is_file():
             raise ToolExecutionError(f"Source file not found: '{args['source']}'")
         if destination.exists():
@@ -158,7 +162,7 @@ def register_file_tools(
         return f"Copied '{args['source']}' to '{args['destination']}'."
 
     async def get_file_info(args: dict[str, Any]) -> str:
-        path = resolve_within_sandbox(workspace_root, args["path"])
+        path = resolve_within_sandbox(workspace_root.current, args["path"])
         if not path.exists():
             raise ToolExecutionError(f"Path not found: '{args['path']}'")
         stat = path.stat()
@@ -169,11 +173,11 @@ def register_file_tools(
     async def search_files(args: dict[str, Any]) -> str:
         keyword = args["keyword"].lower()
         rel = args.get("path", "")
-        start = resolve_within_sandbox(workspace_root, rel)
+        start = resolve_within_sandbox(workspace_root.current, rel)
         if not start.is_dir():
             raise ToolExecutionError(f"Not a directory: '{rel}'")
         matches = [
-            str(p.relative_to(workspace_root))
+            str(p.relative_to(workspace_root.current))
             for p in sorted(start.rglob("*"))
             if p.is_file() and keyword in p.name.lower()
         ]

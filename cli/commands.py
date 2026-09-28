@@ -36,6 +36,7 @@ from cli import service
 from cli.context import CLIContext
 from skills.skill_package import SkillPackageError
 from skills.skill_schema import SkillManifestError
+from tools.calendar import google_auth
 
 _HELP_TEXT = """\
 Available commands:
@@ -49,6 +50,19 @@ Available commands:
   /skills                          List installed skills
   /skills load <url>               Download and install a Skill package (.zip) from a URL
   /skills install <path>           Install a Skill package (.zip) from a local file
+  /workspace                       Show the current workspace root directory
+  /workspace set <path>            Switch the workspace root (persists to .env)
+  /notes                           Show the current notes root directory
+  /notes set <path>                Switch the notes root, e.g. an Obsidian vault (persists to .env)
+  /calendar                        Show the current calendar backend (local or google)
+  /calendar connect                Connect a real Google Calendar (opens a browser for OAuth consent)
+  /calendar disconnect             Switch back to the local JSON calendar
+  /project                         Show the active project (if any) and list all projects
+  /project list                    List all projects
+  /project create <slug>           Create a project (auto directory under sandbox/projects/<slug>)
+  /project create <slug> <path>    Create a project pointed at an existing directory
+  /project use <slug>              Enter a project (repoints the workspace, loads its summary) -- session-only
+  /project none                    Leave the active project, restoring the workspace from before it
   exit                             Quit AuraAgent
 """
 
@@ -76,6 +90,14 @@ async def dispatch_command(line: str, ctx: CLIContext) -> None:
         await _cmd_agents(rest, ctx)
     elif command == "/skills":
         await _cmd_skills(rest, ctx)
+    elif command == "/workspace":
+        _cmd_workspace(rest, ctx)
+    elif command == "/notes":
+        _cmd_notes(rest, ctx)
+    elif command == "/calendar":
+        _cmd_calendar(rest, ctx)
+    elif command == "/project":
+        await _cmd_project(rest, ctx)
     else:
         print(f"Unknown command '{command}'. Type /help for a list of commands.")
 
@@ -240,3 +262,129 @@ async def _review_and_install(staged, ctx: CLIContext) -> None:
         print(f"Failed to install: {exc}")
         return
     print(f"Installed and loaded skill '{registered_name}'. It persists across restarts.")
+
+
+# --- /workspace --------------------------------------------------------------
+
+
+def _cmd_workspace(rest: str, ctx: CLIContext) -> None:
+    if not rest:
+        status = service.get_workspace_status(ctx)
+        print(f"workspace={status.path}")
+        return
+    sub, _, raw_path = rest.partition(" ")
+    raw_path = raw_path.strip()
+    if sub == "set" and raw_path:
+        # partition, not rest.split() — a Windows path can itself contain
+        # spaces ("/workspace set C:\Users\me\My Documents"), same
+        # reasoning as /skills install's own use of partition above.
+        try:
+            resolved = service.set_workspace_root(raw_path, ctx)
+        except ValueError as exc:
+            print(str(exc))
+            return
+        print(f"Workspace set to '{resolved}'. Saved to .env — persists across restarts.")
+    else:
+        print("Usage: /workspace | /workspace set <path>")
+
+
+# --- /notes ------------------------------------------------------------------
+
+
+def _cmd_notes(rest: str, ctx: CLIContext) -> None:
+    if not rest:
+        status = service.get_notes_root_status(ctx)
+        print(f"notes={status.path}")
+        return
+    sub, _, raw_path = rest.partition(" ")
+    raw_path = raw_path.strip()
+    if sub == "set" and raw_path:
+        try:
+            resolved = service.set_notes_root(raw_path, ctx)
+        except ValueError as exc:
+            print(str(exc))
+            return
+        print(f"Notes root set to '{resolved}'. Saved to .env — persists across restarts.")
+    else:
+        print("Usage: /notes | /notes set <path>")
+
+
+# --- /calendar -----------------------------------------------------------
+
+
+def _cmd_calendar(rest: str, ctx: CLIContext) -> None:
+    if not rest:
+        status = service.get_calendar_status(ctx)
+        print(f"backend={status.backend}")
+        return
+    if rest == "connect":
+        try:
+            service.check_google_client_secret(ctx)
+        except ValueError as exc:
+            print(str(exc))
+            return
+        # Blocking, opens a browser and waits for the user to approve the
+        # consent screen -- deliberately done here (cli/commands.py), not in
+        # cli/service.py, which never does blocking/interactive I/O; same
+        # split /config set-key's getpass.getpass() call already follows.
+        print("Opening a browser to connect your Google Calendar...")
+        try:
+            google_auth.run_oauth_flow(ctx.settings.google_client_secret_file, ctx.settings.google_token_file)
+        except Exception as exc:  # noqa: BLE001 - report cleanly, don't crash the REPL on a failed OAuth flow
+            print(f"Google authorization failed: {exc}")
+            return
+        try:
+            service.finish_google_calendar_connect(ctx)
+        except ValueError as exc:
+            print(str(exc))
+            return
+        print("Connected to Google Calendar. Now active immediately -- no restart needed.")
+    elif rest == "disconnect":
+        service.disconnect_google_calendar(ctx)
+        print("Disconnected. Back to the local calendar. (Saved token was kept, in case you reconnect later.)")
+    else:
+        print("Usage: /calendar | /calendar connect | /calendar disconnect")
+
+
+# --- /project --------------------------------------------------------------
+
+
+async def _cmd_project(rest: str, ctx: CLIContext) -> None:
+    if not rest or rest == "list":
+        status = await service.get_project_status(ctx)
+        if not status.projects:
+            print("No projects yet. Use /project create <slug> to make one.")
+            return
+        for project in status.projects:
+            marker = "*" if project.slug == status.active_slug else " "
+            print(f"{marker} {project.slug} -- {project.directory}")
+        if status.active_slug is None:
+            print("(no project active)")
+        return
+
+    sub, _, arg = rest.partition(" ")
+    arg = arg.strip()
+
+    if sub == "create" and arg:
+        # partition, not arg.split() -- the optional path can itself
+        # contain spaces on Windows, same reasoning as /workspace set.
+        slug, _, path = arg.partition(" ")
+        path = path.strip() or None
+        try:
+            project = await service.create_project(ctx, slug, path)
+        except ValueError as exc:
+            print(str(exc))
+            return
+        print(f"Created project '{project.slug}' at '{project.directory}'. Use /project use {project.slug} to enter it.")
+    elif sub == "use" and arg:
+        try:
+            project = await service.use_project(ctx, arg)
+        except ValueError as exc:
+            print(str(exc))
+            return
+        print(f"Entered project '{project.slug}' ({project.directory}). Active immediately, no restart needed.")
+    elif rest == "none":
+        await service.exit_project(ctx)
+        print("Left the active project. Workspace restored to what it was before.")
+    else:
+        print("Usage: /project | /project list | /project create <slug> [path] | /project use <slug> | /project none")

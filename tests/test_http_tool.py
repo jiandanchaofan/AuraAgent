@@ -11,6 +11,7 @@ import pytest
 from core.exceptions import ToolExecutionError
 from tools.registry import ToolRegistry
 from tools.web.fetch_url_tool import register_http_tools
+from tools.workspace_root import SwappableWorkspaceRoot
 
 
 def _registry_with_handler(tmp_path, handler, timeout=5.0, max_bytes=1_000_000, download_max_bytes=1_000_000):
@@ -18,7 +19,7 @@ def _registry_with_handler(tmp_path, handler, timeout=5.0, max_bytes=1_000_000, 
     client = httpx.AsyncClient(transport=transport)
     registry = ToolRegistry()
     workspace = tmp_path / "workspace"
-    register_http_tools(registry, client, timeout, max_bytes, workspace, download_max_bytes)
+    register_http_tools(registry, client, timeout, max_bytes, SwappableWorkspaceRoot(workspace), download_max_bytes)
     return registry, workspace
 
 

@@ -33,7 +33,7 @@ async def main() -> None:
 
     print_banner(
         f"AuraAgent, developed by James Jiang | provider={settings.llm_provider} model={settings.model_id} | "
-        "type 'exit' to quit"
+        f"workspace={ctx.workspace_root.current} | notes={ctx.notes_root.current} | type 'exit' to quit"
     )
     try:
         while True:

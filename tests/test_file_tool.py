@@ -11,13 +11,14 @@ from core.exceptions import ToolExecutionError
 from tests.fakes import FakeConfirmationChannel
 from tools.files.file_tool import register_file_tools
 from tools.registry import ToolRegistry
+from tools.workspace_root import SwappableWorkspaceRoot
 
 
 def _registry(tmp_path, decision: bool = True):
     workspace = tmp_path / "workspace"
     registry = ToolRegistry()
     confirmation = FakeConfirmationChannel(decision=decision)
-    register_file_tools(registry, workspace, confirmation)
+    register_file_tools(registry, SwappableWorkspaceRoot(workspace), confirmation)
     return registry, workspace, confirmation
 
 

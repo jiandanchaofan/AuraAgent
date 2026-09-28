@@ -4,41 +4,45 @@ sandbox root via tools/sandbox_path.resolve_within_sandbox().
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from core.exceptions import ToolExecutionError
 from tools.base import ToolSpec
 from tools.registry import ToolRegistry
 from tools.sandbox_path import resolve_within_sandbox
+from tools.workspace_root import SwappableWorkspaceRoot
 
 
-def register_notes_tools(registry: ToolRegistry, sandbox_root: Path) -> None:
-    """Registers the four note tools against `sandbox_root`, creating it if needed."""
-    sandbox_root.mkdir(parents=True, exist_ok=True)
+def register_notes_tools(registry: ToolRegistry, sandbox_root: SwappableWorkspaceRoot) -> None:
+    """Registers the four note tools against `sandbox_root.current`, read
+    fresh on every call (never cached in a closure) so /notes set
+    (cli/commands.py) can repoint the whole notes sandbox at runtime — e.g.
+    at a real Obsidian vault — same indirection tools/files/file_tool.py
+    already uses for workspace_root."""
 
     async def search_notes(args: dict[str, Any]) -> str:
         keyword = args["keyword"]
+        root = sandbox_root.current
         matches: list[str] = []
-        for md_file in sorted(sandbox_root.rglob("*.md")):
+        for md_file in sorted(root.rglob("*.md")):
             try:
                 text = md_file.read_text(encoding="utf-8")
             except OSError:
                 continue
             if keyword.lower() in text.lower():
-                matches.append(str(md_file.relative_to(sandbox_root)))
+                matches.append(str(md_file.relative_to(root)))
         if not matches:
             return f"No notes found containing '{keyword}'."
         return f"Found {len(matches)} note(s) containing '{keyword}': " + ", ".join(matches)
 
     async def read_note(args: dict[str, Any]) -> str:
-        path = resolve_within_sandbox(sandbox_root, args["path"])
+        path = resolve_within_sandbox(sandbox_root.current, args["path"])
         if not path.is_file():
             raise ToolExecutionError(f"Note not found: '{args['path']}'")
         return path.read_text(encoding="utf-8")
 
     async def create_note(args: dict[str, Any]) -> str:
-        path = resolve_within_sandbox(sandbox_root, args["path"])
+        path = resolve_within_sandbox(sandbox_root.current, args["path"])
         if path.exists():
             raise ToolExecutionError(f"Note already exists: '{args['path']}' (use update_note instead)")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,7 +50,7 @@ def register_notes_tools(registry: ToolRegistry, sandbox_root: Path) -> None:
         return f"Created note '{args['path']}'."
 
     async def update_note(args: dict[str, Any]) -> str:
-        path = resolve_within_sandbox(sandbox_root, args["path"])
+        path = resolve_within_sandbox(sandbox_root.current, args["path"])
         if not path.is_file():
             raise ToolExecutionError(f"Note not found: '{args['path']}' (use create_note instead)")
         mode = args.get("mode", "append")

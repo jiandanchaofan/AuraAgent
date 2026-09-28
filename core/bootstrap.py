@@ -49,8 +49,12 @@ from providers.swappable_provider import SwappableProvider
 from skills.skill_loader import SkillLoader
 from tools.base import RegisteredTool
 from tools.calc.calculate_tool import register_calculate_tools
+from tools.calendar.calendar_provider import CalendarProvider
 from tools.calendar.calendar_tool import register_calendar_tools
+from tools.calendar.google_auth import load_credentials as load_google_credentials
+from tools.calendar.google_calendar_provider import GoogleCalendarProvider
 from tools.calendar.local_json_calendar import LocalJSONCalendarProvider
+from tools.calendar.swappable_calendar_provider import SwappableCalendarProvider
 from tools.files.file_tool import register_file_tools
 from tools.human.ask_human_tool import register_ask_human_tools
 from tools.memory.memory_store import MemoryStore
@@ -58,6 +62,8 @@ from tools.memory.memory_tool import register_memory_tools
 from tools.notes.notes_tool import register_notes_tools
 from tools.profile.user_profile_store import UserProfileStore
 from tools.profile.user_profile_tool import register_user_profile_tools
+from tools.projects.project_store import ActiveProjectState, ProjectStore
+from tools.projects.project_tool import register_project_tools
 from tools.registry import ToolRegistry
 from tools.self_extend.find_capability_tool import register_find_capability_tool
 from tools.self_extend.propose_agent_tool import register_propose_agent_tool
@@ -65,9 +71,14 @@ from tools.self_extend.propose_capability_grant_tool import register_propose_cap
 from tools.self_extend.propose_external_skill_tool import register_propose_external_skill_tool
 from tools.self_extend.propose_mcp_tool import register_propose_mcp_tool
 from tools.self_extend.propose_skill_tool import register_propose_skill_tool
+from tools.system.clipboard_tool import register_clipboard_tools
+from tools.system.notification_tool import register_notification_tools
+from tools.system.process_tool import register_process_tools
+from tools.system.screenshot_tool import register_screenshot_tools
 from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
 from tools.tasks.task_tool import register_task_tools
 from tools.web.fetch_url_tool import build_default_http_client, register_fetch_url_tools, register_http_tools
+from tools.workspace_root import SwappableWorkspaceRoot
 
 
 @dataclass
@@ -86,6 +97,13 @@ class AppContext:
     mcp_config_lock: asyncio.Lock
     known_api_keys: dict[str, str]
     confirmation_channel: ConfirmationChannel
+    workspace_root: SwappableWorkspaceRoot
+    notes_root: SwappableWorkspaceRoot
+    calendar_provider: SwappableCalendarProvider
+    project_store: ProjectStore
+    active_project: ActiveProjectState
+    leader_engine: AsyncReActEngine
+    base_leader_system_prompt: str
     cli_context: CLIContext
 
     async def aclose(self) -> None:
@@ -102,15 +120,49 @@ async def build_app_context(
     logger: AuraLogger,
 ) -> AppContext:
     registry = ToolRegistry()
-    register_notes_tools(registry, settings.notes_sandbox_root)
 
-    calendar_provider = LocalJSONCalendarProvider(settings.calendar_events_file)
+    # Shared mutable indirection (mirrors providers/swappable_provider.py's
+    # exact pattern) so /workspace set (cli/commands.py) can repoint every
+    # workspace-scoped tool at once, at runtime -- see tools/workspace_root.py.
+    workspace_root = SwappableWorkspaceRoot(settings.workspace_root)
+    # Same indirection, independent instance, for the notes sandbox -- /notes
+    # set can repoint it (e.g. at a real Obsidian vault) without touching
+    # workspace_root at all; the two are deliberately unrelated sandboxes.
+    notes_root = SwappableWorkspaceRoot(settings.notes_sandbox_root)
+    register_notes_tools(registry, notes_root)
+
+    # Built here (rather than further down, where it originally lived) since
+    # GoogleCalendarProvider below needs it -- it has no dependency on
+    # anything above it, so moving it earlier is free.
+    http_client = build_default_http_client()
+
+    # Same SwappableProvider-style indirection as workspace_root/notes_root,
+    # one level down -- /calendar connect (cli/commands.py) hot-swaps this to
+    # a real GoogleCalendarProvider once OAuth succeeds, with zero changes to
+    # calendar_tool.py (it only ever calls methods on `calendar_provider`).
+    concrete_calendar: CalendarProvider
+    if settings.calendar_backend == "google":
+        # load_settings() already guarantees this file exists and is valid
+        # before the app is allowed to start with calendar_backend=="google".
+        credentials = load_google_credentials(settings.google_token_file)
+        concrete_calendar = GoogleCalendarProvider(credentials, settings.google_token_file, http_client)
+    else:
+        concrete_calendar = LocalJSONCalendarProvider(settings.calendar_events_file)
+    calendar_provider = SwappableCalendarProvider(concrete_calendar, settings.calendar_backend)
     register_calendar_tools(registry, calendar_provider, confirmation_channel)
 
     task_provider = LocalJSONTaskProvider(settings.tasks_file)
     register_task_tools(registry, task_provider, confirmation_channel)
 
-    register_file_tools(registry, settings.workspace_root, confirmation_channel)
+    register_file_tools(registry, workspace_root, confirmation_channel)
+
+    # Epic L2: system/desktop control -- clipboard/screenshot/process/
+    # notification tools, same "local resource management" ownership as
+    # tools/files/ (orchestrator directly, not delegated to a worker).
+    register_clipboard_tools(registry, settings.clipboard_max_chars)
+    register_screenshot_tools(registry, workspace_root, confirmation_channel)
+    register_process_tools(registry, confirmation_channel)
+    register_notification_tools(registry)
 
     memory_store = MemoryStore(settings.memory_file)
     register_memory_tools(registry, memory_store)
@@ -119,21 +171,35 @@ async def build_app_context(
     user_profile_store = UserProfileStore(settings.user_profile_file)
     register_user_profile_tools(registry, user_profile_store)
 
+    # Project ("/project"): a directory (see workspace_root above -- /project
+    # use hot-swaps it, exactly like /workspace set) + a bounded summary kept
+    # OUTSIDE that directory. update_project_summary is Leader-only -- Workers
+    # are never made aware a project is active at all (see the plan this was
+    # built from: Project and Agent are deliberately orthogonal concepts).
+    # register_project_tools() itself is called further below, once
+    # leader_engine exists -- its handler needs to be able to live-sync
+    # leader_engine.system_prompt after a mid-session summary update.
+    project_store = ProjectStore(
+        registry_path=settings.project_meta_dir / "registry.json",
+        meta_dir=settings.project_meta_dir,
+        summary_max_chars=settings.project_summary_max_chars,
+    )
+    active_project = ActiveProjectState()
+
     register_calculate_tools(registry)
-    http_client = build_default_http_client()
     register_fetch_url_tools(
         registry, http_client, settings.fetch_url_timeout_seconds, settings.fetch_url_max_bytes
     )
     register_http_tools(
         registry, http_client, settings.fetch_url_timeout_seconds, settings.fetch_url_max_bytes,
-        settings.workspace_root, settings.download_max_bytes,
+        workspace_root, settings.download_max_bytes,
     )
 
     mcp_manager = MCPClientManager(settings.mcp_config_path, registry)
     await mcp_manager.connect_all()
 
     skill_loader = SkillLoader(
-        settings.skills_dir, registry, settings.skill_timeout_seconds, workspace_root=settings.workspace_root
+        settings.skills_dir, registry, settings.skill_timeout_seconds, workspace_root=workspace_root
     )
     skill_loader.scan_and_register()
 
@@ -228,6 +294,11 @@ async def build_app_context(
     # mid-session update only takes effect starting the next restart.
     profile_text = (await user_profile_store.get_profile()).render()
     leader_system_prompt = f"{leader.system_prompt}\n\n{profile_text}" if profile_text else leader.system_prompt
+    # Saved verbatim (no project summary spliced in yet -- no project is
+    # active at startup) so /project use/none (cli/service.py) can rebuild
+    # leader_engine.system_prompt as base + current project's summary
+    # without ever losing or double-appending the profile text above.
+    base_leader_system_prompt = leader_system_prompt
 
     leader_engine = AsyncReActEngine(
         provider=provider,
@@ -237,6 +308,12 @@ async def build_app_context(
         max_turns=settings.max_turns,
         agent_name=leader.name,
     )
+    # Registered here (not up near the other stores) because the handler
+    # needs leader_engine + base_leader_system_prompt to live-sync the
+    # prompt after a mid-session summary update -- ScopedToolRegistryView
+    # reads the shared registry live, so registering this late doesn't
+    # make it any less visible to leader_view than an earlier-registered tool.
+    register_project_tools(registry, project_store, active_project, leader_engine, base_leader_system_prompt)
     orchestrator = LeaderWorkerOrchestrator(leader_engine)
 
     # cli/commands.py's human-direct "/" commands (/config, /agents,
@@ -260,6 +337,13 @@ async def build_app_context(
         mcp_manager=mcp_manager,
         http_client=http_client,
         agents_config_lock=agents_config_lock,
+        workspace_root=workspace_root,
+        notes_root=notes_root,
+        calendar_provider=calendar_provider,
+        project_store=project_store,
+        active_project=active_project,
+        leader_engine=leader_engine,
+        base_leader_system_prompt=base_leader_system_prompt,
         known_api_keys=known_api_keys,
         env_file_path=settings.env_file_path,
     )
@@ -279,5 +363,12 @@ async def build_app_context(
         mcp_config_lock=mcp_config_lock,
         known_api_keys=known_api_keys,
         confirmation_channel=confirmation_channel,
+        workspace_root=workspace_root,
+        notes_root=notes_root,
+        calendar_provider=calendar_provider,
+        project_store=project_store,
+        active_project=active_project,
+        leader_engine=leader_engine,
+        base_leader_system_prompt=base_leader_system_prompt,
         cli_context=cli_context,
     )
