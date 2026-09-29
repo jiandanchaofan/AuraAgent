@@ -170,41 +170,110 @@ AuraAgent/
 
 ### Layered Architecture
 
+> Reviewed and refreshed against the current code (it still said "main.py is the composition root," but that moved into `core/bootstrap.py` a while ago, and the diagram was missing the GUI frontend, the `cli/service.py` shared-logic layer, and the three hot-swappable resources added since). Reorganized into the 7 real layers below, color-coded by node kind, instead of one flat, unlayered dependency graph.
+
 ```mermaid
 graph TD
-    Main["main.py<br/>Composition root: the only place that knows every concrete implementation"]
+    subgraph L0["Entry layer · two frontends, one shared backend"]
+        direction LR
+        CLIMain["main.py<br/>terminal REPL"]
+        GUIMain["gui/server.py<br/>FastAPI + WebSocket"]
+    end
 
-    Main -->|constructs| Engine["AsyncReActEngine<br/>core/react_engine.py"]
-    Main -->|constructs| AgentReg["AgentRegistry<br/>parses config/agents.json"]
-    Main -->|reads once at startup, splices into the system prompt| Profile["UserProfileStore<br/>tools/profile/"]
+    subgraph L0b["Human-direct capability layer · bypasses the engine entirely"]
+        direction LR
+        CLICommands["cli/commands.py<br/>'/' command parsing + terminal display"]
+        Service["cli/service.py<br/>pure logic, shared by both frontends"]
+        GUIRoutes["gui/routes.py<br/>REST endpoints"]
+    end
 
-    Engine -->|depends only on the abstraction| SwapProvider["SwappableProvider<br/>providers/swappable_provider.py"]
-    SwapProvider -.forwards to whichever it currently holds.-> LLMProvider["LLMProvider interface"]
-    LLMProvider -.two implementations.-> Anthropic["AnthropicProvider"]
-    LLMProvider -.two implementations.-> OpenAI["OpenAIProvider (also serves DeepSeek)"]
+    subgraph L1["Composition root · the only place that knows every concrete implementation"]
+        Bootstrap["core/bootstrap.py<br/>build_app_context()"]
+    end
 
-    Engine -->|depends only on the abstraction| ToolView["ScopedToolRegistryView<br/>one per Agent, agents/"]
-    ToolView -->|filter + enforce| Registry["ToolRegistry<br/>the one shared singleton, project-wide"]
+    subgraph L2["Orchestration + engine layer"]
+        direction LR
+        AgentReg["AgentRegistry<br/>parses config/agents.json"]
+        Orchestrator["LeaderWorkerOrchestrator"]
+        Engine["AsyncReActEngine<br/>one for the Leader, one per Worker"]
+        AgentReg --> Orchestrator --> Engine
+    end
 
-    Native["Native tools<br/>notes / files / calendar / tasks / calc / web / memory / human"] -->|register| Registry
-    MCPSrc["MCP Server<br/>mcp_integration/"] -->|register| Registry
-    SkillSrc["Skill script<br/>skills_store/*"] -->|register| Registry
-    SelfExtend["propose_new_skill / propose_new_agent<br/>propose_mcp_server / propose_capability_grant<br/>propose_external_skill<br/>tools/self_extend/"] -->|hot register at runtime| Registry
-    SelfExtend -->|persists write-back| ConfigFiles["config/agents.json<br/>config/mcp_servers.json"]
+    subgraph L3["The engine depends on exactly two abstractions"]
+        direction LR
+        SwapProvider["SwappableProvider"] -.forwards to whichever it currently holds.-> LLMProvider["LLMProvider interface"]
+        LLMProvider -.two implementations.-> Anthropic["AnthropicProvider"]
+        LLMProvider -.two implementations.-> OpenAI["OpenAIProvider<br/>(also serves DeepSeek)"]
+        ToolView["ScopedToolRegistryView<br/>one per Agent"] -->|filter + enforce| Registry["ToolRegistry<br/>the one shared singleton, project-wide"]
+    end
 
-    FindCap["find_capability<br/>read-only, no approval needed"] -.recommends candidates, never installs.-> SelfExtend
-    FindCap -.searches.-> MCPRegistry["Official MCP registry"]
-    FindCap -.searches.-> SkillsMP["SkillsMP<br/>third-party Skill index"]
+    subgraph L4["Tool convergence layer · four sources, indistinguishable once registered"]
+        direction LR
+        Native["Native tools<br/>notes/files/calendar/tasks/calc<br/>web/memory/profile/project/system/human"]
+        MCPSrc["MCP Server<br/>mcp_integration/"]
+        SkillSrc["Skill script<br/>skills_store/*"]
+        SelfExtend["Self-extension<br/>5 propose_* tools"]
+        FindCap["find_capability<br/>read-only, never installs<br/>searches: official MCP registry / SkillsMP"]
+    end
 
-    CLI["cli/commands.py<br/>human-direct '/' commands"] -.bypasses entirely.-> Engine
-    CLI -->|same construction/persistence helpers| ConfigFiles
-    CLI -->|calls directly| ToolView
+    subgraph L5["Persistence + runtime-hot-swappable resources"]
+        direction LR
+        ConfigFiles["config/agents.json<br/>config/mcp_servers.json"]
+        Swappables["workspace_root / notes_root<br/>calendar_provider"]
+    end
 
-    Native -.high-risk operations go through.-> Confirmation["ConfirmationChannel<br/>HITL abstraction"]
+    subgraph Cross["Cross-cutting concerns"]
+        direction LR
+        Confirmation["ConfirmationChannel<br/>HITL (Terminal/WebSocket implementations)"]
+        Logger["AuraLogger<br/>Terminal / JSONL / WebSocket sinks"]
+    end
+
+    CLIMain -->|constructs the Terminal implementation| Bootstrap
+    GUIMain -->|constructs the WebSocket implementation| Bootstrap
+    Bootstrap -->|constructs| AgentReg
+    Bootstrap -->|constructs| Registry
+    Bootstrap -->|constructs| Swappables
+
+    CLIMain -->|forwards slash commands to| CLICommands
+    GUIMain -->|also mounts| GUIRoutes
+    CLICommands --> Service
+    GUIRoutes --> Service
+    Service -.bypasses the engine, operates on shared objects directly.-> Registry
+    Service -.writes through the same persistence helpers.-> ConfigFiles
+    Service -.hot-swaps.-> Swappables
+
+    Engine -->|depends only on the abstraction| SwapProvider
+    Engine -->|depends only on the abstraction| ToolView
+
+    Native --> Registry
+    MCPSrc --> Registry
+    SkillSrc --> Registry
+    SelfExtend -->|hot registers at runtime| Registry
+    SelfExtend -->|persists write-back| ConfigFiles
+    FindCap -.recommends candidates, never installs.-> SelfExtend
+
+    Native -.high-risk operations go through.-> Confirmation
     SelfExtend -.reviewed at one of four risk tiers via.-> Confirmation
+    Engine -.writes every Thought/Tool Call/Observation into.-> Logger
+
+    classDef frontend fill:#3457D5,color:#ffffff,stroke:#26399B,stroke-width:1px
+    classDef bypass fill:#5B6270,color:#ffffff,stroke:#3B4048,stroke-width:1px
+    classDef root fill:#E8A23D,color:#1A1D29,stroke:#B8791E,stroke-width:1px
+    classDef engine fill:#6D4FC4,color:#ffffff,stroke:#4B2F99,stroke-width:1px
+    classDef toollayer fill:#2F9E5C,color:#ffffff,stroke:#1F5C3A,stroke-width:1px
+    classDef config fill:#8B92A0,color:#ffffff,stroke:#5B6270,stroke-width:1px
+    classDef cross fill:#C1440E,color:#ffffff,stroke:#8A2F0A,stroke-width:1px
+
+    class CLIMain,GUIMain frontend
+    class CLICommands,Service,GUIRoutes bypass
+    class Bootstrap root
+    class AgentReg,Orchestrator,Engine,SwapProvider,LLMProvider,Anthropic,OpenAI,ToolView,Registry engine
+    class Native,MCPSrc,SkillSrc,SelfExtend,FindCap toollayer
+    class ConfigFiles,Swappables config
+    class Confirmation,Logger cross
 ```
 
-The core idea: **the engine sits at the center and only knows interfaces; four tool sources (native/MCP/Skill/self-extension) all converge on the same `ToolRegistry`, and the CLI command layer is the one bypass path that never goes through the engine**. This "convergence" design is what lets the whole architecture keep expanding without rotting — `core/react_engine.py`'s signature and responsibilities haven't changed since its very first line.
+The core idea: **the two frontends (the CLI's `main.py` and the GUI's `gui/server.py`) share one and the same composition root, `core/bootstrap.py::build_app_context()`** — whichever frontend triggers a new capability, it lands in the exact same set of objects. The engine sits at the center of the diagram and only knows interfaces; four tool sources (native/MCP/Skill/self-extension) all converge on the same `ToolRegistry`; and `cli/service.py` is the one logic layer behind every human-direct capability (changing config, adding an Agent, installing a Skill) — `cli/commands.py` (the terminal's "/" commands) and `gui/routes.py` (the REST panels) are just two thin shells wrapped around it, which is exactly what turns "CLI and GUI stay feature-equal" from a slogan into an architectural fact. This "convergence + composition root" design is what lets the whole architecture keep expanding without rotting — `core/react_engine.py`'s signature and responsibilities haven't changed since its very first line.
 
 ### Per-Module Architecture
 

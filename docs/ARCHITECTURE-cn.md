@@ -170,41 +170,110 @@ AuraAgent/
 
 ### 分层架构
 
+> 这张图审视后已按当前代码刷新（此前仍标注"main.py 是组合根"，实际组合根早已搬进 `core/bootstrap.py`，且缺了 GUI 前端、`cli/service.py` 共享逻辑层、三个可热切换资源等后来加的部分）。按真实层次重新组织为下面 7 个分组，配色区分节点类型，而不再是一张不分层的依赖图。
+
 ```mermaid
 graph TD
-    Main["main.py<br/>组合根：唯一知道所有具体实现的地方"]
+    subgraph L0["入口层 · 两个前端，共享同一套后端"]
+        direction LR
+        CLIMain["main.py<br/>终端 REPL"]
+        GUIMain["gui/server.py<br/>FastAPI + WebSocket"]
+    end
 
-    Main -->|构造| Engine["AsyncReActEngine<br/>core/react_engine.py"]
-    Main -->|构造| AgentReg["AgentRegistry<br/>解析 config/agents.json"]
-    Main -->|启动时读一次, 拼进 system prompt| Profile["UserProfileStore<br/>tools/profile/"]
+    subgraph L0b["人工直连能力层 · 完全绕过引擎"]
+        direction LR
+        CLICommands["cli/commands.py<br/>斜杠命令解析 + 终端展示"]
+        Service["cli/service.py<br/>纯逻辑，两端共用"]
+        GUIRoutes["gui/routes.py<br/>REST 端点"]
+    end
 
-    Engine -->|只依赖抽象| SwapProvider["SwappableProvider<br/>providers/swappable_provider.py"]
-    SwapProvider -.转发到当前持有的.-> LLMProvider["LLMProvider 接口"]
-    LLMProvider -.两个实现.-> Anthropic["AnthropicProvider"]
-    LLMProvider -.两个实现.-> OpenAI["OpenAIProvider（也服务 DeepSeek）"]
+    subgraph L1["组合根 · 唯一知道所有具体实现的地方"]
+        Bootstrap["core/bootstrap.py<br/>build_app_context()"]
+    end
 
-    Engine -->|只依赖抽象| ToolView["ScopedToolRegistryView<br/>每个 Agent 一份，agents/"]
-    ToolView -->|过滤 + 强制校验| Registry["ToolRegistry<br/>全项目唯一共享单例"]
+    subgraph L2["编排与引擎层"]
+        direction LR
+        AgentReg["AgentRegistry<br/>解析 config/agents.json"]
+        Orchestrator["LeaderWorkerOrchestrator"]
+        Engine["AsyncReActEngine<br/>Leader + 各 Worker 各一份"]
+        AgentReg --> Orchestrator --> Engine
+    end
 
-    Native["原生工具<br/>notes / files / calendar / tasks / calc / web / memory / human"] -->|register| Registry
-    MCPSrc["MCP Server<br/>mcp_integration/"] -->|register| Registry
-    SkillSrc["Skill 脚本<br/>skills_store/*"] -->|register| Registry
-    SelfExtend["propose_new_skill / propose_new_agent<br/>propose_mcp_server / propose_capability_grant<br/>propose_external_skill<br/>tools/self_extend/"] -->|运行时热 register| Registry
-    SelfExtend -->|持久化写回| ConfigFiles["config/agents.json<br/>config/mcp_servers.json"]
+    subgraph L3["引擎只依赖两个抽象接口"]
+        direction LR
+        SwapProvider["SwappableProvider"] -.转发到当前持有的.-> LLMProvider["LLMProvider 接口"]
+        LLMProvider -.两个实现.-> Anthropic["AnthropicProvider"]
+        LLMProvider -.两个实现.-> OpenAI["OpenAIProvider<br/>（兼容 DeepSeek）"]
+        ToolView["ScopedToolRegistryView<br/>每个 Agent 一份"] -->|过滤 + 强制校验| Registry["ToolRegistry<br/>全项目唯一共享单例"]
+    end
 
-    FindCap["find_capability<br/>只读, 无需审批"] -.推荐候选, 不安装.-> SelfExtend
-    FindCap -.搜索.-> MCPRegistry["官方 MCP registry"]
-    FindCap -.搜索.-> SkillsMP["SkillsMP<br/>第三方 Skill 索引"]
+    subgraph L4["工具汇流层 · 四种来源，注册后彼此不可区分"]
+        direction LR
+        Native["原生工具<br/>notes/files/calendar/tasks/calc<br/>web/memory/profile/project/system/human"]
+        MCPSrc["MCP Server<br/>mcp_integration/"]
+        SkillSrc["Skill 脚本<br/>skills_store/*"]
+        SelfExtend["自我扩展<br/>5 个 propose_*"]
+        FindCap["find_capability<br/>只读, 不安装<br/>搜索: 官方 MCP registry / SkillsMP"]
+    end
 
-    CLI["cli/commands.py<br/>人工直连 '/' 命令"] -.完全绕过.-> Engine
-    CLI -->|同一套构造/持久化助手| ConfigFiles
-    CLI -->|直接调用| ToolView
+    subgraph L5["持久化 + 运行时可热切换资源"]
+        direction LR
+        ConfigFiles["config/agents.json<br/>config/mcp_servers.json"]
+        Swappables["workspace_root / notes_root<br/>calendar_provider"]
+    end
 
-    Native -.高风险操作走.-> Confirmation["ConfirmationChannel<br/>HITL 抽象"]
-    SelfExtend -.三档风险审查走.-> Confirmation
+    subgraph Cross["横切关注点"]
+        direction LR
+        Confirmation["ConfirmationChannel<br/>HITL（Terminal/WebSocket 两种实现）"]
+        Logger["AuraLogger<br/>Terminal / JSONL / WebSocket 三种 Sink"]
+    end
+
+    CLIMain -->|构造 Terminal 实现| Bootstrap
+    GUIMain -->|构造 WebSocket 实现| Bootstrap
+    Bootstrap -->|构造| AgentReg
+    Bootstrap -->|构造| Registry
+    Bootstrap -->|构造| Swappables
+
+    CLIMain -->|斜杠命令转发给| CLICommands
+    GUIMain -->|同时挂载| GUIRoutes
+    CLICommands --> Service
+    GUIRoutes --> Service
+    Service -.绕过引擎, 直接操作共享对象.-> Registry
+    Service -.同一套持久化助手写.-> ConfigFiles
+    Service -.热切换.-> Swappables
+
+    Engine -->|只依赖抽象| SwapProvider
+    Engine -->|只依赖抽象| ToolView
+
+    Native --> Registry
+    MCPSrc --> Registry
+    SkillSrc --> Registry
+    SelfExtend -->|热注册| Registry
+    SelfExtend -->|持久化写回| ConfigFiles
+    FindCap -.推荐候选, 不安装.-> SelfExtend
+
+    Native -.高风险操作走.-> Confirmation
+    SelfExtend -.四档风险审查走.-> Confirmation
+    Engine -.每一轮 Thought/Tool Call/Observation 写入.-> Logger
+
+    classDef frontend fill:#3457D5,color:#ffffff,stroke:#26399B,stroke-width:1px
+    classDef bypass fill:#5B6270,color:#ffffff,stroke:#3B4048,stroke-width:1px
+    classDef root fill:#E8A23D,color:#1A1D29,stroke:#B8791E,stroke-width:1px
+    classDef engine fill:#6D4FC4,color:#ffffff,stroke:#4B2F99,stroke-width:1px
+    classDef toollayer fill:#2F9E5C,color:#ffffff,stroke:#1F5C3A,stroke-width:1px
+    classDef config fill:#8B92A0,color:#ffffff,stroke:#5B6270,stroke-width:1px
+    classDef cross fill:#C1440E,color:#ffffff,stroke:#8A2F0A,stroke-width:1px
+
+    class CLIMain,GUIMain frontend
+    class CLICommands,Service,GUIRoutes bypass
+    class Bootstrap root
+    class AgentReg,Orchestrator,Engine,SwapProvider,LLMProvider,Anthropic,OpenAI,ToolView,Registry engine
+    class Native,MCPSrc,SkillSrc,SelfExtend,FindCap toollayer
+    class ConfigFiles,Swappables config
+    class Confirmation,Logger cross
 ```
 
-核心信息：**引擎在最中间，只认接口；四种工具来源（原生/MCP/Skill/自我扩展）最终都汇流到同一个 `ToolRegistry`，而 CLI 命令层是唯一一条不经过引擎的旁路通道**。这个"汇流"设计是整个架构能长期扩展而不腐化的关键——`core/react_engine.py` 从第一行代码到现在，签名和职责完全没变过。
+核心信息：**两个前端（CLI 的 `main.py`、GUI 的 `gui/server.py`）共享同一个组合根 `core/bootstrap.py::build_app_context()`——新增/新装的能力，不管从哪个前端触发，落地的都是同一批对象**。引擎在图正中间，只认接口；四种工具来源（原生/MCP/Skill/自我扩展）最终都汇流到同一个 `ToolRegistry`；`cli/service.py` 是所有人工直连能力（改配置、装 Agent、装 Skill）唯一的逻辑层——`cli/commands.py`（终端斜杠命令）和 `gui/routes.py`（REST 面板）只是包在它外面的两层薄壳，这正是"CLI 和 GUI 功能保持一致"从口号变成架构事实的地方。这个"汇流 + 组合根"设计是整个架构能长期扩展而不腐化的关键——`core/react_engine.py` 从第一行代码到现在，签名和职责完全没变过。
 
 ### 各功能模块架构
 
