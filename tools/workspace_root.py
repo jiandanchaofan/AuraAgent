@@ -4,8 +4,8 @@ of the LLM provider.
 
 Every tool that reads/writes the workspace sandbox (tools/files/file_tool.py,
 tools/system/screenshot_tool.py, tools/web/fetch_url_tool.py's
-download_file, skills/skill_loader.py's AURA_WORKSPACE_ROOT env var for
-skill subprocesses like make_pptx) holds a reference to the SAME
+download_file, tools/documents/*, skills/skill_loader.py's
+AURA_WORKSPACE_ROOT env var for skill subprocesses) holds a reference to the SAME
 SwappableWorkspaceRoot instance instead of a bare Path captured once at
 registration time. That single level of indirection is what lets the
 /workspace set CLI command (cli/commands.py) repoint every one of them at

@@ -49,11 +49,23 @@ def test_every_log_method_fans_out_to_every_sink():
     logger.log_confirmation(1, "delete this?", True)
     logger.log_final_answer("done")
     logger.log_error(1, "boom")
+    logger.log_schedule_result("sched1", "daily insight", "the result")
 
-    assert len(sink_a.events) == len(sink_b.events) == 8
+    assert len(sink_a.events) == len(sink_b.events) == 9
     assert [e["event_type"] for e in sink_a.events] == [
         "user_input", "calling_llm", "thought", "tool_call", "observation", "confirmation", "final_answer", "error",
+        "schedule_result",
     ]
+
+
+def test_log_schedule_result_payload_shape():
+    sink = _RecordingSink()
+    logger = AuraLogger([sink])
+
+    logger.log_schedule_result("sched1", "daily insight", "the result")
+
+    assert sink.events[0]["payload"] == {"schedule_id": "sched1", "task": "daily insight", "summary": "the result"}
+    assert sink.events[0]["agent_name"] == "scheduler"
 
 
 def test_log_thought_skips_all_sinks_when_empty():

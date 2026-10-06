@@ -21,6 +21,25 @@ Project is deliberately Leader-only and tool-agnostic: it doesn't know
 about notes/calendar/tasks, and Worker engines are never made aware a
 Project exists at all (see core/bootstrap.py's wiring for how the active
 Project's summary gets spliced into ONLY the Leader engine's system_prompt).
+
+Two further pieces of accumulated context, added for the "sustainable
+accumulation base" upgrade, follow the SAME push-vs-pull split already
+established for the global user_profile (push) vs memory_store (pull):
+  - `ProjectSummary.role` -- a short persona/instructions block, PUSHED
+    into the Leader's system prompt via render(), same mechanism as
+    current_state. AI-drafted (update_project_summary) but freely
+    user-editable (PATCH /api/projects/{slug}/role, /project role).
+  - Per-project Memory -- PULLED via remember_project_fact/
+    recall_project_facts (tools/projects/project_tool.py), never
+    auto-injected, because facts can accumulate past what's worth paying
+    prompt-token cost for on every turn. Backed by memory_store_for()
+    below, which just points the EXISTING MemoryStore class
+    (tools/memory/memory_store.py) at this project's own facts.json --
+    no new store class.
+`ProjectInfo.enabled_tools` is a third, unrelated piece: Skill/MCP tool
+name patterns visible to the Leader ONLY while this project is active
+(see agents/scoped_tool_registry.py's dynamic-patterns mechanism) --
+purely additive on top of the always-on config/agents.json capabilities.
 """
 from __future__ import annotations
 
@@ -33,9 +52,10 @@ from pathlib import Path
 from typing import Any
 
 from core.react_engine import AsyncReActEngine
+from tools.memory.memory_store import MemoryStore
 
 _SLUG_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
-_EMPTY_SUMMARY: dict[str, Any] = {"current_state": "", "outputs": [], "open_questions": []}
+_EMPTY_SUMMARY: dict[str, Any] = {"role": "", "current_state": "", "open_questions": []}
 
 
 @dataclass
@@ -44,34 +64,53 @@ class ProjectInfo:
     name: str
     directory: Path
     created_at: str
+    #: Tool name patterns (fnmatch globs, e.g. "mcp_filesystem_*") that
+    #: become visible to the Leader ONLY while this project is active --
+    #: see ScopedToolRegistryView.set_dynamic_patterns() and
+    #: cli/service.py's use_project()/exit_project(). Purely additive on
+    #: top of the orchestrator's always-on config/agents.json capabilities,
+    #: never a restriction.
+    enabled_tools: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ProjectSummary:
+    #: A short persona/instructions block for how the Leader should act
+    #: within this project -- AI-drafted (via update_project_summary) but
+    #: freely user-editable (PATCH /api/projects/{slug}/role, /project
+    #: role). REPLACED wholesale on each update, same as current_state,
+    #: and shares its character cap -- Role is meant to stay short.
+    role: str = ""
     #: A short, standing description of where things are -- REPLACED
     #: wholesale on each update, never appended to. This is what keeps
     #: the summary's token cost roughly constant no matter how long a
-    #: Project has been used, instead of growing like a log.
+    #: Project has been used, instead of growing like a log. Deliberately
+    #: also the place to mention a notable deliverable in passing (e.g.
+    #: "drafted report.pdf, now working on slides") -- there used to be a
+    #: separate `outputs` list for this, but it was pure duplication of
+    #: what `list_directory` already answers accurately and on demand, so
+    #: it was retired: any AI-maintained catalog of "files that exist" can
+    #: only ever be a stale shadow of the real directory, never the
+    #: source of truth. See docs/ARCHITECTURE.md's Epic P2 entry.
     current_state: str = ""
-    #: "<file/deliverable> -- one-line note", dedup-appended -- lets the
-    #: Leader know what already exists without re-reading it.
-    outputs: list[str] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
-        return not (self.current_state or self.outputs or self.open_questions)
+        return not (self.role or self.current_state or self.open_questions)
 
     def render(self) -> str:
         """Mirrors tools/profile/user_profile_store.py::UserProfile.render() --
         "" for an empty summary costs zero extra prompt tokens rather than
-        an empty-looking section every turn."""
+        an empty-looking section every turn. `role`, if set, comes first --
+        persona before status, so the Leader knows WHO it's acting as
+        before reading WHERE things stand."""
         if self.is_empty():
             return ""
         lines = ["Active project summary (from prior sessions on this project):"]
+        if self.role:
+            lines.append(f"- Role: {self.role}")
         if self.current_state:
             lines.append(f"- Current state: {self.current_state}")
-        if self.outputs:
-            lines.append(f"- Outputs so far: {'; '.join(self.outputs)}")
         if self.open_questions:
             lines.append(f"- Open questions: {'; '.join(self.open_questions)}")
         return "\n".join(lines)
@@ -83,14 +122,24 @@ class ActiveProjectState:
     connect are (see project_store.py's module docstring / the plan this
     was built from): the user explicitly wants this to be a frequent,
     optional, per-session choice, not a standing setting a restart
-    remembers. `pre_project_workspace` is a single snapshot (not a
-    stack) taken the first time ANY project is entered this session --
-    switching directly between two projects doesn't touch it; only
-    `/project none` consumes and clears it."""
+    remembers.
+
+    Deliberately holds ONLY `current_slug`, no snapshot of "what
+    workspace_root was before this project" -- an earlier version had a
+    `pre_project_workspace` field for exactly that, consumed/cleared by
+    /project none to restore it. That snapshot-and-restore approach is
+    what let /workspace set and /project use silently clobber each other
+    (set_workspace_root() had no idea a snapshot even existed, so it would
+    overwrite workspace_root while a project was active, and the next
+    /project none would then "restore" a value that was never meant to be
+    live anymore). cli/service.py::sync_active_directory() replaces the
+    whole snapshot/restore model: every turn recomputes its own correct
+    directory fresh (Project > a Chat's own override > the persisted
+    default), so there is nothing to remember or put back -- see that
+    function's own docstring."""
 
     def __init__(self) -> None:
         self.current_slug: str | None = None
-        self.pre_project_workspace: Path | None = None
 
 
 class ProjectStore:
@@ -116,19 +165,43 @@ class ProjectStore:
     @staticmethod
     def _to_info(raw: dict[str, Any]) -> ProjectInfo:
         return ProjectInfo(
-            slug=raw["slug"], name=raw["name"], directory=Path(raw["directory"]), created_at=raw["created_at"]
+            slug=raw["slug"],
+            name=raw["name"],
+            directory=Path(raw["directory"]),
+            created_at=raw["created_at"],
+            enabled_tools=list(raw.get("enabled_tools", [])),
         )
 
     def _summary_file(self, slug: str) -> Path:
         return self._meta_dir / slug / "summary.json"
 
+    def _memory_file(self, slug: str) -> Path:
+        return self._meta_dir / slug / "memory.json"
+
+    def memory_store_for(self, slug: str) -> MemoryStore:
+        """A per-Project instance of the SAME MemoryStore class the global
+        remember_fact/recall_facts tools use, just pointed at this
+        Project's own facts.json instead of the global one -- see the
+        module docstring's "Memory reuses MemoryStore" note. Constructed
+        fresh on each call (cheap: MemoryStore's __init__ just mkdir's and
+        seeds an empty file if missing) rather than cached, so callers
+        never need to worry about holding a stale instance across a
+        Project rename/directory change."""
+        return MemoryStore(self._memory_file(slug))
+
     def _load_summary(self, slug: str) -> ProjectSummary:
         summary_file = self._summary_file(slug)
         if not summary_file.exists():
             return ProjectSummary()
+        # {**_EMPTY_SUMMARY, **raw} also harmlessly absorbs a stray "outputs"
+        # key from a summary.json written before that field was retired --
+        # it's simply never read back into ProjectSummary below, and drops
+        # out of the file for good the next time this project is saved.
         raw = {**_EMPTY_SUMMARY, **json.loads(summary_file.read_text(encoding="utf-8"))}
         return ProjectSummary(
-            current_state=raw["current_state"], outputs=list(raw["outputs"]), open_questions=list(raw["open_questions"])
+            role=raw["role"],
+            current_state=raw["current_state"],
+            open_questions=list(raw["open_questions"]),
         )
 
     async def list_projects(self) -> list[ProjectInfo]:
@@ -158,10 +231,49 @@ class ProjectStore:
                 created_at=datetime.now(timezone.utc).isoformat(),
             )
             raw_projects.append(
-                {"slug": info.slug, "name": info.name, "directory": str(info.directory), "created_at": info.created_at}
+                {
+                    "slug": info.slug,
+                    "name": info.name,
+                    "directory": str(info.directory),
+                    "created_at": info.created_at,
+                    "enabled_tools": [],
+                }
             )
             self._save_registry(raw_projects)
             return info
+
+    async def rename_project(self, slug: str, name: str) -> ProjectInfo:
+        """Renames the project's display `name` -- `slug` (its id and
+        directory-mapping key) never changes. Same validation shape as
+        ChatSessionStore.rename_session() (tools/sessions/session_store.py),
+        which both the CLI ("/project rename", cli/commands.py) and the GUI
+        (PATCH /api/projects/{slug}, gui/routes.py) go through."""
+        name = name.strip()
+        if not name:
+            raise ValueError("Name cannot be empty.")
+        async with self._lock:
+            raw_projects = self._load_registry()
+            for raw in raw_projects:
+                if raw["slug"] == slug:
+                    raw["name"] = name[:200]
+                    self._save_registry(raw_projects)
+                    return self._to_info(raw)
+            raise ValueError(f"No project named '{slug}'.")
+
+    async def set_enabled_tools(self, slug: str, patterns: list[str]) -> ProjectInfo:
+        """Replaces this Project's `enabled_tools` wholesale (not merged) --
+        same shape as rename_project. Called from cli/service.py's
+        set_project_tools(), which also re-syncs ScopedToolRegistryView's
+        dynamic patterns immediately if `slug` happens to be the currently
+        active project (see agents/scoped_tool_registry.py)."""
+        async with self._lock:
+            raw_projects = self._load_registry()
+            for raw in raw_projects:
+                if raw["slug"] == slug:
+                    raw["enabled_tools"] = list(patterns)
+                    self._save_registry(raw_projects)
+                    return self._to_info(raw)
+            raise ValueError(f"No project named '{slug}'.")
 
     async def get_summary(self, slug: str) -> ProjectSummary:
         async with self._lock:
@@ -170,23 +282,24 @@ class ProjectStore:
     async def update_summary(
         self,
         slug: str,
+        role: str | None = None,
         current_state: str | None = None,
-        outputs: list[str] | None = None,
         open_questions: list[str] | None = None,
     ) -> ProjectSummary:
         async with self._lock:
             summary_file = self._summary_file(slug)
             summary_file.parent.mkdir(parents=True, exist_ok=True)
             current = self._load_summary(slug)
+            if role is not None:
+                current.role = role[: self._summary_max_chars]
             if current_state is not None:
                 current.current_state = current_state[: self._summary_max_chars]
-            current.outputs = _merge_dedup_capped(current.outputs, outputs, self._max_list_items)
             current.open_questions = _merge_dedup_capped(current.open_questions, open_questions, self._max_list_items)
             summary_file.write_text(
                 json.dumps(
                     {
+                        "role": current.role,
                         "current_state": current.current_state,
-                        "outputs": current.outputs,
                         "open_questions": current.open_questions,
                     },
                     indent=2,

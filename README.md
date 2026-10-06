@@ -40,10 +40,12 @@ Here's a tour of AuraAgent's capabilities, grouped by what you'd actually use th
 - **Research the web.** It can fetch and read web pages, submit forms, and pull down files. It also has a few built-in specialties for market/industry research — give it a topic like "electric vehicles" or "AI chips" and it'll pull recent real headlines on new products, technology trends, or major company moves.
 - **Take notes.** It can create, read, update, and full-text search a library of Markdown notes — which you can point at a folder you already use, like an Obsidian vault, instead of a folder AuraAgent manages for you.
 - **Manage your calendar and to-do list.** By default this is a local, private calendar/task list. If you want, you can connect your *real* Google Calendar instead (a one-time setup — see Chapter 5), and it'll read, create, update, and delete actual events on it.
-- **Manage files on your computer** — inside a folder you designate, never your whole hard drive. It can list, read, write, move, copy, and search files there, and it can also reach Anthropic's official file-management tools for more advanced operations like precise partial edits.
+- **Manage files on your computer** — inside a folder you designate, never your whole hard drive. It can list, read, write, move, copy, and search files there, including a precise partial edit (replace one exact piece of text in place) instead of rewriting a whole file for a small change — handy for a large note or document it's maintaining incrementally. It can also reach Anthropic's official file-management tools for more advanced operations.
+- **Read and produce real documents.** Word, PowerPoint, and Excel files can be read, created from scratch, and edited (appending content, or a simple find/replace); PDFs can be read (text-based ones — there's no OCR for scanned pages). No separate setup needed.
 - **Control your desktop**, in small, supervised ways: read or write your clipboard, take a screenshot, see what programs are running and close one that's stuck, or pop up a desktop notification.
 - **Remember things about you.** It can hold both a quick, structured profile of your standing preferences and habits (shown to it automatically every time), and a searchable library of specific facts you've told it to remember.
 - **Accumulate context on long-running work.** You can create a named "Project" (a research topic, an ongoing piece of work — anything) and AuraAgent will keep a running, compact summary of where things stand, so picking a project back up next week doesn't mean starting from zero. More in Chapter 7.
+- **Run tasks on a schedule.** Ask it once, in plain language, and it'll run again later on its own — once at a specific time, or repeatedly (hourly, daily, weekly on specific days, monthly, yearly) — with no one needing to be there when it fires. More in Chapter 8.
 - **Learn new skills, with your approval.** If nothing built-in can do what you're asking, AuraAgent can write itself a small, single-purpose tool, search a public index of ready-made tools, or connect to a well-known external service — but only after showing you exactly what it wants to do, in full, and getting your go-ahead.
 
 Out of the box, AuraAgent comes with a small starter team: an **orchestrator** who handles your requests directly and delegates to two specialists — a **researcher** (web research, calculations, market research) and a **scheduler** (calendar and to-do management). You can add more team members later, either by asking AuraAgent to propose one itself or by configuring one directly.
@@ -142,9 +144,30 @@ Once you're inside a project, anything AuraAgent saves — documents, notes, res
 
 Entering a project is just for that session; nothing is selected automatically when you start up, and you're free to switch between projects — or leave one entirely — whenever you like.
 
+In the graphical app, this same idea extends down to individual chats: any chat that isn't part of a Project can be given its own working directory too (its ⋯ menu → "设置工作目录"/set working directory), pointing it at any real folder on your computer — not just for chats inside a Project. A Project's own directory always wins if a chat has both; the directory setting just quietly resumes the moment you take the chat back out of the Project, nothing is lost by moving it in and out.
+
+A Project has grown into more than a folder and a summary. It can carry its own **Role** — a short description of how AuraAgent should behave specifically within that project, drafted by the AI but always yours to rewrite — and its own **Memory**, a set of durable facts scoped to that project alone, kept separate from what it remembers about you in general. You can also let a project load extra tools it wouldn't normally have — a particular MCP server or Skill — so they're only available while that project is active, keeping everything else uncluttered. And if something you're discussing was actually covered in a *different* chat under the same project, AuraAgent can search across that project's other chats to find it, instead of treating every chat as a blank slate.
+
+In the graphical app, a project's own page gives each of these its own tab — Role and Memory, which tools are loaded, and the project's files (upload, rename, delete, download) — so managing any of it is a matter of clicking, not remembering command syntax.
+
 ---
 
-## Chapter 8 — What's Done, and What's Next
+## Chapter 8 — Running Tasks on Your Schedule
+
+Some things don't need you to ask every time — they just need to happen: check on something every morning, follow up once at a specific time, keep an eye on a topic every week. You can just ask, in plain language, in any chat — inside a Project's or a completely unrelated one, no special command needed for the ask itself:
+
+> "Every day at 9am, look into what's new with OpenAI and save a short write-up."
+> "Remind me about the contract renewal on October 5th at 3pm."
+
+It confirms the details with you before setting anything up — this creates a standing commitment, not a one-off action, so it always asks first. Once approved, it runs on its own at the time(s) you described — once, or repeatedly on whatever schedule you gave it (hourly, daily, specific weekdays, monthly, yearly). Set one up while working inside a Project, and it runs with that Project's own context (files, Role, Memory) already loaded, exactly as if you'd typed the request yourself.
+
+Two things worth knowing about how this works: since no one's there to answer if a step needs your approval mid-task, anything that would normally ask for confirmation is automatically skipped rather than left waiting. And it only actually fires while AuraAgent itself is running (the terminal or the graphical app) — if it was closed when something was due, it catches up the next time you start it rather than silently skipping it.
+
+All your scheduled tasks — across every Project and outside of any Project — live in one place: the **Schedules** panel in the graphical app (or `/schedule` in the terminal), where you can see what's coming up, what already ran and how it went, and pause, edit, or delete any of them.
+
+---
+
+## Chapter 9 — What's Done, and What's Next
 
 AuraAgent has been built incrementally, with each piece fully working and tested before moving to the next. As of today, it can:
 
@@ -152,13 +175,17 @@ AuraAgent has been built incrementally, with each piece fully working and tested
 - Research the web, do market/industry research on a given topic
 - Manage notes, a calendar (local or real Google Calendar), and a to-do list
 - Manage files on your computer, including advanced editing tools
+- Read, create, and edit Word/PowerPoint/Excel documents, and read text-based PDFs
 - Control basic desktop functions (clipboard, screenshots, running programs, notifications)
 - Remember durable facts and a structured profile about you across sessions
 - Accumulate long-term context inside named Projects
+- Run tasks on their own, once or on a schedule, without you present
 - Write itself new tools, recruit new team members, and connect to outside services — always with your approval first
 - Run either in a terminal, or in a graphical desktop window
 
-Looking ahead, two things are the current top priority, precisely because real usage has already run into both: **actually understanding what's inside a big pile of documents** — right now it can only search plain-text notes by exact wording, not the PDFs/reports a research-heavy Project tends to accumulate — and **being able to speak up on its own**, not just respond when spoken to, which matters most for the kind of ongoing, mentorship-style use where only-answering-when-asked leaves something missing. After those: handling very long, deep-research tasks more gracefully (picking up where it left off instead of just failing partway through), and — further out, watched but not yet scheduled — actually *seeing* a screenshot or a document image instead of only knowing where it was saved.
+The backend can also now safely be reached by more than one device at once, each with its own access token (off by default — a purely local setup is completely unaffected) — groundwork for a future companion mobile app to talk to the same AuraAgent running on your computer, not a feature you'd turn on today without one.
+
+Looking ahead, the current top priority is **handling very long, deep-research tasks more gracefully** — picking up where it left off instead of just failing partway through. Scheduled tasks (Chapter 8) cover the most concrete form of "speaking up on its own" — a standing time-based commitment you set in advance — but AuraAgent still can't decide, entirely on its own judgment and with no time set in advance, that something newly worth mentioning has come up; that more open-ended form of proactivity is a further-out goal, not yet scheduled. Further out still, watched but not yet scheduled: actually *seeing* a screenshot or a document image (not just its embedded text) instead of only knowing where it was saved, and editing PDF layout, not just reading it.
 
 ---
 

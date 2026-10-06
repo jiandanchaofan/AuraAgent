@@ -15,6 +15,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from core.exceptions import LLMOutputTruncatedError
 from core.message_types import ConversationTurn, LLMResponse, ToolCallRequest
 from providers.base import LLMProvider
 from tools.base import ToolSpec
@@ -54,7 +55,14 @@ class OpenAIProvider(LLMProvider):
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         for turn in history:
             if turn.role == "assistant":
-                messages.append(turn.raw)
+                # `raw` is the verbatim API response from a live round-trip
+                # (the normal case). A turn reconstructed from a resumed
+                # chat session's persisted events (gui/server.py's
+                # _history_from_events) only has `text` -- turn.raw would be
+                # None there, which sent as-is becomes a literal `null`
+                # entry in the `messages` array and the API rejects the
+                # whole request (a real bug this fixes, not a hypothetical).
+                messages.append(turn.raw if turn.raw is not None else {"role": "assistant", "content": turn.text or ""})
             elif turn.tool_results is not None:
                 for result in turn.tool_results:
                     messages.append(
@@ -86,16 +94,36 @@ class OpenAIProvider(LLMProvider):
         # this mirrors how AnthropicProvider round-trips `response.content`.
         raw_message = message.model_dump(exclude_none=True)
 
-        tool_calls = [
-            ToolCallRequest(
-                call_id=call.id,
-                tool_name=call.function.name,
-                arguments=json.loads(call.function.arguments or "{}"),
-            )
-            for call in (message.tool_calls or [])
-        ]
-
         finish_reason = response.choices[0].finish_reason
+
+        tool_calls = []
+        for call in (message.tool_calls or []):
+            try:
+                arguments = json.loads(call.function.arguments or "{}")
+            except json.JSONDecodeError as exc:
+                # Real failure mode this guards against: the model was still
+                # inside this tool call's JSON arguments when it hit
+                # max_tokens (a many-slide create_pptx deck is a realistic
+                # trigger), so `call.function.arguments` is a syntactically
+                # truncated fragment, not valid JSON -- json.loads blowing up
+                # here is expected, not a bug in the argument text itself.
+                # Re-raised as a clear, actionable error instead of letting a
+                # bare JSONDecodeError ("Unterminated string starting at...")
+                # propagate with no explanation of what actually happened.
+                cause = (
+                    "the response was cut off before it finished (hit the max_tokens limit)"
+                    if finish_reason == "length"
+                    else "the response's JSON could not be parsed"
+                )
+                raise LLMOutputTruncatedError(
+                    f"The model's call to '{call.function.name}' failed: {cause}. "
+                    "Try asking for something shorter (e.g. fewer slides/paragraphs), or raise "
+                    "AURA_LLM_MAX_OUTPUT_TOKENS in your .env and restart."
+                ) from exc
+            tool_calls.append(
+                ToolCallRequest(call_id=call.id, tool_name=call.function.name, arguments=arguments)
+            )
+
         if finish_reason == "tool_calls":
             stop_reason = "tool_use"
         elif finish_reason == "stop":

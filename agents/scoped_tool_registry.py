@@ -25,6 +25,17 @@ touch the shared ToolRegistry — this is how Leader-Worker delegation tools
 Leader alone: Worker views are always built with extra_tools=None, so
 delegate_to_* tools are structurally absent from anything a Worker can see
 or call — not merely omitted by convention.
+
+`_dynamic_patterns` is a second, parallel pattern list alongside
+`_allowed_patterns` — WHOLESALE-REPLACEABLE (via set_dynamic_patterns(),
+never accreted like add_allowed_pattern()'s permanent grants), used by
+cli/service.py's use_project()/exit_project() to make a Project's own
+enabled_tools visible ONLY while that Project is active. Kept separate
+from `_allowed_patterns` rather than reusing add_allowed_pattern()
+because that method has no matching "remove" (a permanent capability
+grant is never meant to be retracted); a Project's tool grants need to
+disappear cleanly the moment the Project is exited, which a single
+replaceable list gives for free.
 """
 from __future__ import annotations
 
@@ -51,9 +62,28 @@ class ScopedToolRegistryView:
         # passed in.
         self._allowed_patterns = list(allowed_patterns)
         self._extra_tools = extra_tools or {}
+        self._dynamic_patterns: list[str] = []
 
     def _is_allowed(self, tool_name: str) -> bool:
-        return any(fnmatch(tool_name, pattern) for pattern in self._allowed_patterns)
+        return any(fnmatch(tool_name, pattern) for pattern in self._allowed_patterns) or any(
+            fnmatch(tool_name, pattern) for pattern in self._dynamic_patterns
+        )
+
+    def set_dynamic_patterns(self, patterns: list[str]) -> None:
+        """Wholesale-replaces the dynamic pattern list (see the module
+        docstring) — called with a Project's enabled_tools on entering it,
+        and with [] on leaving. get_tool_specs()/dispatch() both re-read
+        this fresh on every call (no caching), so it takes effect
+        immediately, same as add_allowed_pattern()."""
+        self._dynamic_patterns = list(patterns)
+
+    def get_dynamic_patterns(self) -> list[str]:
+        """Read-only snapshot of the current dynamic pattern list (a copy,
+        not the live list) — used by tools/scheduler/scheduler_loop.py to
+        save/restore this view's Project-scoped grants around a scheduled
+        run that temporarily borrows this same Leader view for a
+        different (or no) Project."""
+        return list(self._dynamic_patterns)
 
     def is_allowed(self, tool_name: str) -> bool:
         """Public read of the same check dispatch() enforces — used by

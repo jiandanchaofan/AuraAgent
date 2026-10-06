@@ -140,6 +140,64 @@ async def test_write_file_creates_parent_directories(tmp_path):
     assert (workspace / "a" / "b" / "c.txt").is_file()
 
 
+# --- write_file mode="str_replace" (N14) -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_file_str_replace_replaces_unique_match(tmp_path):
+    registry, workspace, confirmation = _registry(tmp_path, decision=False)
+    await registry.dispatch("write_file", {"path": "a.txt", "content": "line one\nline two\nline three"})
+
+    await registry.dispatch(
+        "write_file", {"path": "a.txt", "mode": "str_replace", "old_str": "line two", "new_str": "LINE TWO"}
+    )
+
+    result = await registry.dispatch("read_file", {"path": "a.txt"})
+    assert result == "line one\nLINE TWO\nline three"
+    assert confirmation.requests == []  # no confirmation gate, same as overwrite
+
+
+@pytest.mark.asyncio
+async def test_write_file_str_replace_zero_matches_raises(tmp_path):
+    registry, workspace, _ = _registry(tmp_path)
+    await registry.dispatch("write_file", {"path": "a.txt", "content": "hello"})
+
+    with pytest.raises(ToolExecutionError, match="not found"):
+        await registry.dispatch(
+            "write_file", {"path": "a.txt", "mode": "str_replace", "old_str": "nope", "new_str": "x"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_write_file_str_replace_multiple_matches_raises(tmp_path):
+    registry, workspace, _ = _registry(tmp_path)
+    await registry.dispatch("write_file", {"path": "a.txt", "content": "dup\ndup"})
+
+    with pytest.raises(ToolExecutionError, match="matches 2 times"):
+        await registry.dispatch(
+            "write_file", {"path": "a.txt", "mode": "str_replace", "old_str": "dup", "new_str": "x"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_write_file_str_replace_requires_existing_file(tmp_path):
+    registry, workspace, _ = _registry(tmp_path)
+
+    with pytest.raises(ToolExecutionError, match="File not found"):
+        await registry.dispatch(
+            "write_file", {"path": "nope.txt", "mode": "str_replace", "old_str": "a", "new_str": "b"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_write_file_str_replace_requires_both_old_and_new(tmp_path):
+    registry, workspace, _ = _registry(tmp_path)
+    await registry.dispatch("write_file", {"path": "a.txt", "content": "hello"})
+
+    with pytest.raises(ToolExecutionError, match="requires both"):
+        await registry.dispatch("write_file", {"path": "a.txt", "mode": "str_replace", "old_str": "hello"})
+
+
 @pytest.mark.asyncio
 async def test_read_file_missing_raises(tmp_path):
     registry, workspace, _ = _registry(tmp_path)

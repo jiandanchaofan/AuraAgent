@@ -11,7 +11,7 @@ from confirmation.base import ConfirmationChannel, ConfirmationRequest
 from core.exceptions import ToolExecutionError
 from tools.base import ToolSpec
 from tools.registry import ToolRegistry
-from tools.tasks.task_provider import TaskNotFoundError, TaskProvider
+from tools.tasks.task_provider import UNSET, TaskNotFoundError, TaskProvider
 
 
 def register_task_tools(
@@ -20,8 +20,27 @@ def register_task_tools(
     confirmation_channel: ConfirmationChannel,
 ) -> None:
     async def create_task(args: dict[str, Any]) -> str:
-        task = await provider.create_task(args["title"], args.get("notes"))
+        task = await provider.create_task(args["title"], args.get("notes"), args.get("due"))
         return f"Created task '{task.title}' (id={task.id})."
+
+    async def update_task(args: dict[str, Any]) -> str:
+        task_id = args["task_id"]
+        notes = None if args.get("clear_notes") else args.get("notes", UNSET)
+        due = None if args.get("clear_due") else args.get("due", UNSET)
+        try:
+            task = await provider.update_task(task_id, title=args.get("title"), notes=notes, due=due)
+        except TaskNotFoundError as exc:
+            raise ToolExecutionError(str(exc)) from exc
+        return f"Updated task '{task.title}' (id={task.id})."
+
+    async def set_task_done(args: dict[str, Any]) -> str:
+        task_id = args["task_id"]
+        try:
+            task = await provider.set_task_done(task_id, args["done"])
+        except TaskNotFoundError as exc:
+            raise ToolExecutionError(str(exc)) from exc
+        state = "done" if task.done else "not done"
+        return f"Task '{task.title}' is now {state}."
 
     async def list_tasks(args: dict[str, Any]) -> str:
         include_completed = args.get("include_completed", True)
@@ -68,6 +87,7 @@ def register_task_tools(
                 "properties": {
                     "title": {"type": "string"},
                     "notes": {"type": "string", "description": "Optional extra detail"},
+                    "due": {"type": "string", "description": "Optional due date, ISO-8601 (e.g. '2026-03-05')"},
                 },
                 "required": ["title"],
             },
@@ -99,6 +119,40 @@ def register_task_tools(
             },
         ),
         complete_task,
+    )
+    registry.register(
+        ToolSpec(
+            name="update_task",
+            description="Edit a task's title/notes/due date. Set clear_notes/clear_due=true to explicitly clear that field.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "title": {"type": "string", "description": "Optional new title"},
+                    "notes": {"type": "string", "description": "Optional new notes"},
+                    "due": {"type": "string", "description": "Optional new due date, ISO-8601"},
+                    "clear_notes": {"type": "boolean", "description": "Set true to clear the notes field"},
+                    "clear_due": {"type": "boolean", "description": "Set true to clear the due date"},
+                },
+                "required": ["task_id"],
+            },
+        ),
+        update_task,
+    )
+    registry.register(
+        ToolSpec(
+            name="set_task_done",
+            description="Mark a task done or not done (a real toggle, unlike complete_task which only ever marks done).",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "done": {"type": "boolean"},
+                },
+                "required": ["task_id", "done"],
+            },
+        ),
+        set_task_done,
     )
     registry.register(
         ToolSpec(

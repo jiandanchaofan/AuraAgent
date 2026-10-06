@@ -28,7 +28,12 @@ from tests.fakes import FakeLLMProvider, make_test_logger
 from tools.base import ToolSpec
 from tools.calendar.local_json_calendar import LocalJSONCalendarProvider
 from tools.calendar.swappable_calendar_provider import SwappableCalendarProvider
+from tools.devices.device_store import DeviceStore
+from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
+from tools.tasks.swappable_task_provider import SwappableTaskProvider
+from tools.personal_graph.graph_store import GraphStore
 from tools.projects.project_store import ActiveProjectState, ProjectStore
+from tools.scheduler.schedule_store import ScheduleStore
 from tools.registry import ToolRegistry
 from tools.workspace_root import SwappableWorkspaceRoot
 
@@ -78,6 +83,7 @@ def _build_ctx(tmp_path: Path, provider_responses=None) -> CLIContext:
         agents_config_path=agents_config_path,
         skills_dir=skills_dir,
         openai_base_url=None,
+        llm_max_output_tokens=8192,
         calendar_events_file=tmp_path / "calendar" / "events.json",
         google_client_secret_file=tmp_path / "calendar" / "google_client_secret.json",
         google_token_file=tmp_path / "calendar" / "google_token.json",
@@ -108,14 +114,22 @@ def _build_ctx(tmp_path: Path, provider_responses=None) -> CLIContext:
         http_client=httpx.AsyncClient(),
         agents_config_lock=asyncio.Lock(),
         workspace_root=SwappableWorkspaceRoot(tmp_path / "workspace"),
+        default_workspace_root=SwappableWorkspaceRoot(tmp_path / "workspace"),
         notes_root=SwappableWorkspaceRoot(tmp_path / "notes"),
+        quick_notes_subdir="Daily Notes",
         calendar_provider=SwappableCalendarProvider(
             LocalJSONCalendarProvider(tmp_path / "calendar" / "events.json"), "local"
+        ),
+        task_provider=SwappableTaskProvider(
+            LocalJSONTaskProvider(tmp_path / "tasks" / "tasks.json"), "local"
         ),
         project_store=project_store,
         active_project=ActiveProjectState(),
         leader_engine=leader_engine,
         base_leader_system_prompt=base_leader_system_prompt,
+        schedule_store=ScheduleStore(tmp_path / "schedules.json"),
+        device_store=DeviceStore(tmp_path / "devices.json"),
+        graph_store=GraphStore(tmp_path / "graph.db"),
         known_api_keys={"anthropic": "sk-ant-abcdef0000", "openai": ""},
         env_file_path=tmp_path / ".env",
     )
@@ -502,6 +516,47 @@ async def test_workspace_set_nonexistent_drive_letter_reports_clearly_not_a_raw_
     assert "Could not create or access" in out
     assert "Traceback" not in out
 
+@pytest.mark.asyncio
+async def test_workspace_set_while_project_active_does_not_disturb_the_project(tmp_path, capsys):
+    # Real bug this guards against: /workspace set and /project use used
+    # to silently fight over the exact same shared workspace_root, with
+    # no coordination -- running /workspace set while a Project was active
+    # would leave the UI/system prompt still reporting the Project as
+    # active while every file tool had actually moved somewhere else.
+    # sync_active_directory()'s priority chain (Project > Chat directory >
+    # default) makes this impossible by construction: the live directory
+    # only ever changes here if no Project governs it.
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    await dispatch_command("/project use alpha", ctx)
+    project_dir = (tmp_path / "projects" / "alpha").resolve()
+    assert ctx.workspace_root.current == project_dir
+    capsys.readouterr()
+    new_default = tmp_path / "elsewhere"
+
+    await dispatch_command(f"/workspace set {new_default}", ctx)
+
+    # The Project is still fully active and the live directory untouched.
+    assert ctx.active_project.current_slug == "alpha"
+    assert ctx.workspace_root.current == project_dir
+    out = capsys.readouterr().out
+    assert "won't take effect until" in out
+
+    # But the new default WAS saved, and takes effect once the Project is left.
+    await dispatch_command("/project none", ctx)
+    assert ctx.workspace_root.current == new_default.resolve()
+
+@pytest.mark.asyncio
+async def test_workspace_set_with_no_project_active_still_applies_immediately(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    new_root = tmp_path / "elsewhere"
+
+    await dispatch_command(f"/workspace set {new_root}", ctx)
+
+    assert ctx.workspace_root.current == new_root.resolve()
+    out = capsys.readouterr().out
+    assert "won't take effect" not in out
+
 # --- /notes ----------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -553,6 +608,41 @@ async def test_notes_set_rejects_auraagents_own_project_directory(tmp_path, caps
 async def test_notes_set_missing_argument_shows_usage(tmp_path, capsys):
     ctx = _build_ctx(tmp_path)
     await dispatch_command("/notes set", ctx)
+    assert "Usage" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_notes_show_prints_quick_notes_subdir(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/notes", ctx)
+    assert "Daily Notes" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_notes_quickdir_switches_and_persists_to_env(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+
+    await dispatch_command("/notes quickdir Journal/Daily", ctx)
+
+    assert ctx.quick_notes_subdir == "Journal/Daily"
+    from dotenv import dotenv_values
+
+    saved = dotenv_values(ctx.env_file_path)
+    assert saved["AURA_QUICK_NOTES_SUBDIR"] == "Journal/Daily"
+    assert "Quick notes subdirectory set" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_notes_quickdir_rejects_path_traversal(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    original = ctx.quick_notes_subdir
+
+    await dispatch_command("/notes quickdir ../../escape", ctx)
+
+    assert ctx.quick_notes_subdir == original  # unchanged
+    assert "resolves outside" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_notes_quickdir_missing_argument_shows_usage(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/notes quickdir", ctx)
     assert "Usage" in capsys.readouterr().out
 
 # --- /calendar -------------------------------------------------------------
@@ -750,3 +840,389 @@ async def test_project_use_does_not_persist_to_env(tmp_path):
     await dispatch_command("/project use alpha", ctx)
 
     assert not ctx.env_file_path.exists()  # /project never calls set_key()
+
+@pytest.mark.asyncio
+async def test_project_rename_changes_display_name_not_slug(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/project rename alpha Alpha Team Research", ctx)
+    assert "Renamed 'alpha' to 'Alpha Team Research'" in capsys.readouterr().out
+
+    status = await service.get_project_status(ctx)
+    assert status.projects[0].slug == "alpha"
+    assert status.projects[0].name == "Alpha Team Research"
+
+@pytest.mark.asyncio
+async def test_project_rename_unknown_slug_reports_error(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project rename nope New Name", ctx)
+    assert "No project named 'nope'" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_project_rename_missing_name_shows_usage(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/project rename alpha", ctx)
+    assert "Usage: /project rename" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_project_role_sets_and_syncs_active_prompt(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    await dispatch_command("/project use alpha", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/project role alpha Act as a compliance assistant", ctx)
+
+    assert "Updated role for 'alpha'" in capsys.readouterr().out
+    assert "Act as a compliance assistant" in ctx.leader_engine.system_prompt
+
+@pytest.mark.asyncio
+async def test_project_role_on_inactive_project_does_not_touch_prompt(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    await dispatch_command("/project create beta", ctx)
+    await dispatch_command("/project use alpha", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/project role beta Act as X", ctx)
+
+    assert "Act as X" not in ctx.leader_engine.system_prompt
+
+@pytest.mark.asyncio
+async def test_project_role_unknown_slug_reports_error(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project role nope some text", ctx)
+    assert "No project named 'nope'" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_project_state_sets_and_syncs_active_prompt(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    await dispatch_command("/project use alpha", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/project state alpha drafted the first report.pdf", ctx)
+
+    assert "Updated current state for 'alpha'" in capsys.readouterr().out
+    assert "drafted the first report.pdf" in ctx.leader_engine.system_prompt
+
+@pytest.mark.asyncio
+async def test_project_state_on_inactive_project_does_not_touch_prompt(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    await dispatch_command("/project create beta", ctx)
+    await dispatch_command("/project use alpha", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/project state beta drafted X", ctx)
+
+    assert "drafted X" not in ctx.leader_engine.system_prompt
+
+@pytest.mark.asyncio
+async def test_project_state_unknown_slug_reports_error(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project state nope some text", ctx)
+    assert "No project named 'nope'" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_project_memory_add_list_and_delete(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/project memory alpha add The client's budget is $50k", ctx)
+    assert "Remembered" in capsys.readouterr().out
+
+    await dispatch_command("/project memory alpha", ctx)
+    listed = capsys.readouterr().out
+    assert "$50k" in listed
+
+    fact_id = listed.strip().split("id=")[1].split(")")[0]
+    await dispatch_command(f"/project memory alpha delete {fact_id}", ctx)
+    assert "Deleted fact" in capsys.readouterr().out
+
+    await dispatch_command("/project memory alpha", ctx)
+    assert "No memory recorded yet" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_project_memory_edit(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    await dispatch_command("/project memory alpha add original text", ctx)
+    fact_id = capsys.readouterr().out.strip().split("id=")[1].split(")")[0]
+
+    await dispatch_command(f"/project memory alpha edit {fact_id} revised text", ctx)
+
+    assert "revised text" in capsys.readouterr().out
+    await dispatch_command("/project memory alpha", ctx)
+    assert "revised text" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_project_tools_list_shows_available_candidates(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/project tools alpha", ctx)
+
+    assert "Enabled for 'alpha': (none)" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_project_tools_unknown_slug_reports_error(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project tools nope", ctx)
+    assert "No project named 'nope'" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_project_tools_enable_and_disable_round_trip(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create alpha", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/project tools alpha enable mcp_example_*", ctx)
+    assert "Enabled 'mcp_example_*'" in capsys.readouterr().out
+    status = await service.get_project_status(ctx)
+    assert status.projects[0].enabled_tools == ["mcp_example_*"]
+
+    await dispatch_command("/project tools alpha disable mcp_example_*", ctx)
+    assert "Disabled 'mcp_example_*'" in capsys.readouterr().out
+    status = await service.get_project_status(ctx)
+    assert status.projects[0].enabled_tools == []
+
+
+# --- /mcp --------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_mcp_reports_no_servers_when_none_connected(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/mcp", ctx)
+    assert "No MCP servers connected" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_mcp_lists_connected_servers_with_tool_counts(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    ctx.registry.register(
+        ToolSpec(name="mcp_example_reverse_text", description="x", input_schema={"type": "object", "properties": {}}),
+        _dummy_handler,
+    )
+    ctx.registry.register(
+        ToolSpec(name="mcp_example_word_count", description="x", input_schema={"type": "object", "properties": {}}),
+        _dummy_handler,
+    )
+    ctx.mcp_manager.connected_servers.append("example")
+
+    await dispatch_command("/mcp", ctx)
+    assert "example -- 2 tool(s)" in capsys.readouterr().out
+
+
+# --- /schedule ---------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_schedule_list_when_empty(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/schedule", ctx)
+    assert "No schedules yet" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_schedule_add_once(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/schedule add once 2026-10-05T15:00:00 remind me to renew insurance", ctx)
+    out = capsys.readouterr().out
+    assert "Scheduled" in out
+    assert "2026-10-05 15:00" in out
+
+    schedules = await ctx.schedule_store.list_schedules()
+    assert len(schedules) == 1
+    assert schedules[0].task == "remind me to renew insurance"
+    assert schedules[0].trigger_type == "once"
+    assert schedules[0].project_slug is None
+
+@pytest.mark.asyncio
+async def test_schedule_add_cron(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/schedule add cron 0 9 * * * daily OpenAI insight", ctx)
+    out = capsys.readouterr().out
+    assert "Scheduled" in out
+    assert "每天 09:00" in out
+
+    schedules = await ctx.schedule_store.list_schedules()
+    assert schedules[0].cron_expression == "0 9 * * *"
+    assert schedules[0].task == "daily OpenAI insight"
+
+@pytest.mark.asyncio
+async def test_schedule_add_cron_with_project(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create ai_governance", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/schedule add cron 0 9 * * * project ai_governance daily insight", ctx)
+
+    schedules = await ctx.schedule_store.list_schedules()
+    assert schedules[0].project_slug == "ai_governance"
+    assert schedules[0].task == "daily insight"
+
+@pytest.mark.asyncio
+async def test_schedule_add_cron_unknown_project_reports_error(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/schedule add cron 0 9 * * * project ghost some task", ctx)
+    assert "No project named 'ghost'" in capsys.readouterr().out
+    assert await ctx.schedule_store.list_schedules() == []
+
+@pytest.mark.asyncio
+async def test_schedule_add_cron_too_few_tokens_shows_usage(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/schedule add cron 0 9 * *", ctx)  # only 4 cron fields, no task text at all
+    assert "Usage: /schedule" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_schedule_add_cron_invalid_expression_reports_error(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/schedule add cron 0 9 * * not enough fields", ctx)
+    assert "Invalid cron expression" in capsys.readouterr().out
+    assert await ctx.schedule_store.list_schedules() == []
+
+@pytest.mark.asyncio
+async def test_schedule_list_shows_created_schedules(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/schedule add cron 0 9 * * * daily insight", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/schedule", ctx)
+    out = capsys.readouterr().out
+    assert "daily insight" in out
+    assert "(unaffiliated)" in out
+
+@pytest.mark.asyncio
+async def test_schedule_pause_and_resume(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    schedule = await ctx.schedule_store.create_schedule(task="x", trigger_type="recurring", cron_expression="0 9 * * *")
+    capsys.readouterr()
+
+    await dispatch_command(f"/schedule pause {schedule.id}", ctx)
+    assert f"Paused '{schedule.id}'" in capsys.readouterr().out
+    assert (await ctx.schedule_store.get_schedule(schedule.id)).enabled is False
+
+    await dispatch_command(f"/schedule resume {schedule.id}", ctx)
+    assert f"Resumed '{schedule.id}'" in capsys.readouterr().out
+    assert (await ctx.schedule_store.get_schedule(schedule.id)).enabled is True
+
+@pytest.mark.asyncio
+async def test_schedule_pause_unknown_id_reports_error(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/schedule pause nonexistent", ctx)
+    assert "No such schedule" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_schedule_delete(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    schedule = await ctx.schedule_store.create_schedule(task="x", trigger_type="recurring", cron_expression="0 9 * * *")
+    capsys.readouterr()
+
+    await dispatch_command(f"/schedule delete {schedule.id}", ctx)
+
+    assert f"Deleted '{schedule.id}'" in capsys.readouterr().out
+    assert await ctx.schedule_store.get_schedule(schedule.id) is None
+
+@pytest.mark.asyncio
+async def test_schedule_edit_task(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    schedule = await ctx.schedule_store.create_schedule(task="old", trigger_type="recurring", cron_expression="0 9 * * *")
+    capsys.readouterr()
+
+    await dispatch_command(f"/schedule edit {schedule.id} task new text here", ctx)
+
+    assert f"Updated '{schedule.id}'" in capsys.readouterr().out
+    assert (await ctx.schedule_store.get_schedule(schedule.id)).task == "new text here"
+
+@pytest.mark.asyncio
+async def test_schedule_edit_cron(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    run_at = "2026-10-05T15:00:00"
+    schedule = await ctx.schedule_store.create_schedule(task="x", trigger_type="once", run_at=run_at)
+    capsys.readouterr()
+
+    await dispatch_command(f"/schedule edit {schedule.id} cron 0 9 * * *", ctx)
+
+    updated = await ctx.schedule_store.get_schedule(schedule.id)
+    assert updated.trigger_type == "recurring"
+    assert updated.cron_expression == "0 9 * * *"
+
+@pytest.mark.asyncio
+async def test_schedule_edit_project_to_none(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/project create ai_governance", ctx)
+    schedule = await ctx.schedule_store.create_schedule(
+        task="x", trigger_type="recurring", cron_expression="0 9 * * *", project_slug="ai_governance"
+    )
+    capsys.readouterr()
+
+    await dispatch_command(f"/schedule edit {schedule.id} project none", ctx)
+
+    assert (await ctx.schedule_store.get_schedule(schedule.id)).project_slug is None
+
+@pytest.mark.asyncio
+async def test_schedule_edit_unknown_project_reports_error(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    schedule = await ctx.schedule_store.create_schedule(task="x", trigger_type="recurring", cron_expression="0 9 * * *")
+    capsys.readouterr()
+
+    await dispatch_command(f"/schedule edit {schedule.id} project ghost", ctx)
+
+    assert "No project named 'ghost'" in capsys.readouterr().out
+
+# --- /device (N14 -- Auralis / remote access) -------------------------------
+
+@pytest.mark.asyncio
+async def test_device_list_when_empty(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/device", ctx)
+    assert "No devices registered yet" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_device_register_prints_a_one_time_token(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+
+    await dispatch_command("/device register test-phone", ctx)
+
+    out = capsys.readouterr().out
+    assert "Registered device 'test-phone'" in out
+    assert "Token (shown once" in out
+    devices = await ctx.device_store.list_devices()
+    assert len(devices) == 1
+    assert devices[0].name == "test-phone"
+
+@pytest.mark.asyncio
+async def test_device_list_shows_registered_devices(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    await dispatch_command("/device register test-phone", ctx)
+    capsys.readouterr()
+
+    await dispatch_command("/device", ctx)
+
+    out = capsys.readouterr().out
+    assert "test-phone" in out
+    assert "never" in out  # last_seen_at, before any token verification
+
+@pytest.mark.asyncio
+async def test_device_revoke(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+    device, _ = await ctx.device_store.create_device("test-phone")
+    capsys.readouterr()
+
+    await dispatch_command(f"/device revoke {device.id}", ctx)
+
+    assert f"Revoked '{device.id}'" in capsys.readouterr().out
+    assert await ctx.device_store.list_devices() == []
+
+@pytest.mark.asyncio
+async def test_device_revoke_unknown_id_reports_error(tmp_path, capsys):
+    ctx = _build_ctx(tmp_path)
+
+    await dispatch_command("/device revoke nonexistent", ctx)
+
+    assert "No such device" in capsys.readouterr().out

@@ -30,7 +30,7 @@ export default function OpenQuestionCard({ node, onRespond }) {
             placeholder="Type your answer..."
             disabled={busy}
           />
-          <button type="submit" className="btn btn-approve" disabled={busy || !answer.trim()}>
+          <button type="submit" className="btn btn-accent" disabled={busy || !answer.trim()}>
             Send
           </button>
         </form>

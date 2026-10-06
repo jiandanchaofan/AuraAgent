@@ -37,7 +37,14 @@ class AnthropicProvider(LLMProvider):
         messages: list[dict[str, Any]] = []
         for turn in history:
             if turn.role == "assistant":
-                messages.append({"role": "assistant", "content": turn.raw})
+                # `raw` is the verbatim content-block list from a live
+                # round-trip (the normal case). A turn reconstructed from a
+                # resumed chat session's persisted events (gui/server.py's
+                # _history_from_events) only has `text` -- turn.raw would be
+                # None there, which sent as-is becomes {"role":"assistant",
+                # "content": None} and the API rejects the whole request (a
+                # real bug this fixes, not a hypothetical).
+                messages.append({"role": "assistant", "content": turn.raw if turn.raw is not None else (turn.text or "")})
             elif turn.tool_results is not None:
                 messages.append(
                     {

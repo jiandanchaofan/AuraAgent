@@ -41,3 +41,18 @@ class MaxTurnsExceededError(AuraAgentError):
 
 class SandboxPathError(AuraAgentError):
     """A tool attempted to access a path outside its configured sandbox root."""
+
+
+class LLMOutputTruncatedError(AuraAgentError):
+    """The model's own response was cut off mid-generation (hit max_tokens)
+    while it was still inside a tool call's arguments, leaving unparseable
+    JSON -- e.g. asking for a many-slide create_pptx deck.
+
+    Raised by a provider (providers/openai_provider.py) instead of letting
+    the underlying json.JSONDecodeError propagate bare: that stdlib error
+    ("Unterminated string starting at: line 1 column 7713 (char 7712)")
+    gives a human no idea what actually happened. This still propagates
+    and crashes the current run() call loudly, same as any other error not
+    caught by core/react_engine.py (see this module's own docstring) -- the
+    fix here is a clear message, not swallowing the error.
+    """

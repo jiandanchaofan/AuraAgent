@@ -17,12 +17,20 @@ from gui.ws_log_sink import WebSocketSink
 
 
 def _drain_one(sink: WebSocketSink) -> dict:
-    return sink._queue.get_nowait()
+    return sink._queues[sink.current].get_nowait()
+
+
+def _registered(sink: WebSocketSink) -> WebSocketSink:
+    """Every write() in these tests needs a registered+current connection
+    (N14) -- this is the single-connection fake id used throughout."""
+    sink.register("conn-1")
+    sink.current = "conn-1"
+    return sink
 
 
 @pytest.mark.asyncio
 async def test_confirm_writes_a_request_event_and_awaits_resolution():
-    sink = WebSocketSink()
+    sink = _registered(WebSocketSink())
     logger = AuraLogger([sink])
     channel = WebSocketConfirmationChannel(sink, logger)
 
@@ -52,7 +60,7 @@ async def test_confirm_decision_is_logged_after_resolution():
             events.append(event)
             super().write(event)
 
-    recording = _RecordingSink()
+    recording = _registered(_RecordingSink())
     logger = AuraLogger([recording])
     channel = WebSocketConfirmationChannel(recording, logger)
 
@@ -60,7 +68,7 @@ async def test_confirm_decision_is_logged_after_resolution():
         channel.confirm(ConfirmationRequest(tool_name="x", arguments={}, reason="ok?"))
     )
     await asyncio.sleep(0.01)
-    request_event = recording._queue.get_nowait()
+    request_event = _drain_one(recording)
     channel.resolve(request_event["request_id"], False)
     await task
 
@@ -71,7 +79,7 @@ async def test_confirm_decision_is_logged_after_resolution():
 
 @pytest.mark.asyncio
 async def test_ask_open_question_writes_a_request_and_returns_the_answer():
-    sink = WebSocketSink()
+    sink = _registered(WebSocketSink())
     logger = AuraLogger([sink])
     channel = WebSocketConfirmationChannel(sink, logger)
 
@@ -98,13 +106,13 @@ async def test_ask_open_question_answer_is_never_logged():
             logged.append(event)
             super().write(event)
 
-    recording = _RecordingSink()
+    recording = _registered(_RecordingSink())
     logger = AuraLogger([recording])
     channel = WebSocketConfirmationChannel(recording, logger)
 
     task = asyncio.create_task(channel.ask_open_question("secret?"))
     await asyncio.sleep(0.01)
-    request_event = recording._queue.get_nowait()
+    request_event = _drain_one(recording)
     channel.resolve(request_event["request_id"], "super-secret")
     await task
 

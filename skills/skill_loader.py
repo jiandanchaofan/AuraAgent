@@ -18,18 +18,20 @@ aborting startup — same "optional, best-effort" posture as MCP servers.
 
 If `workspace_root` is given, every skill subprocess also gets an
 AURA_WORKSPACE_ROOT env var pointing at it — real, live use surfaced a bug
-where make_pptx (skills_store/make_pptx/run.py) saved a user-given
-`output_path` relative to its OWN directory (this module's documented
-`cwd=`, above) rather than the workspace the rest of the app's file tools
+where a document-generating skill saved a user-given `output_path`
+relative to its OWN directory (this module's documented `cwd=`, above)
+rather than the workspace the rest of the app's file tools
 (tools/files/file_tool.py) use, so a generated file was both unreachable
-by those tools and, for any path with a subdirectory, crashed outright
-(python-pptx doesn't create missing parent directories). A skill that
-writes user-facing output files is expected to read this env var itself
-and resolve/sandbox its own output path against it, the same way
-tools/files/file_tool.py resolves against its own workspace_root -- see
-make_pptx's run.py for the reference implementation. `workspace_root`
-defaults to None (no env var injected) so every existing caller/test that
-doesn't care about this keeps its exact prior behavior.
+by those tools and, for any path with a subdirectory, crashed outright.
+A skill that writes user-facing output files is expected to read this env
+var itself and resolve/sandbox its own output path against it, the same
+way tools/files/file_tool.py resolves against its own workspace_root.
+(This whole problem class is why document generation was later migrated
+off Skills entirely, onto the native tools/documents/ tools, which run
+in-process and share workspace_root directly -- see that package's own
+docstrings.) `workspace_root` defaults to None (no env var injected) so
+every existing caller/test that doesn't care about this keeps its exact
+prior behavior.
 """
 from __future__ import annotations
 
@@ -139,10 +141,25 @@ class SkillLoader:
                 raise ToolExecutionError(f"Skill '{manifest.name}' timed out after {self._timeout_seconds}s.")
 
             if process.returncode != 0:
-                raise ToolExecutionError(
-                    f"Skill '{manifest.name}' exited with code {process.returncode}: "
-                    f"{stderr.decode('utf-8', errors='replace').strip()}"
-                )
+                # Real bug this fixes: the success path below returns
+                # stdout, establishing stdout as the convention a skill
+                # uses to communicate its result -- including a
+                # print(json.dumps({"error": ...})) before sys.exit(1),
+                # which is the documented pattern several skills follow for
+                # their OWN error details. Surfacing only stderr here silently
+                # discarded exactly that detail, leaving the caller (the
+                # LLM, or a human debugging it) staring at an
+                # unexplained "exited with code 1" with nothing to go on.
+                # Show whichever stream actually has content; if both do
+                # (e.g. a real Python traceback alongside a partial
+                # stdout message), show both rather than picking one.
+                stdout_text = stdout.decode("utf-8", errors="replace").strip()
+                stderr_text = stderr.decode("utf-8", errors="replace").strip()
+                if stdout_text and stderr_text:
+                    detail = f"{stdout_text}\n[stderr] {stderr_text}"
+                else:
+                    detail = stdout_text or stderr_text or "(no output on either stream)"
+                raise ToolExecutionError(f"Skill '{manifest.name}' exited with code {process.returncode}: {detail}")
             return stdout.decode("utf-8", errors="replace").strip()
 
         self._registry.register(

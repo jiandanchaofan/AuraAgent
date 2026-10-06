@@ -55,37 +55,13 @@ def test_all_shipped_market_insight_skills_parse_and_register():
 
 
 @pytest.mark.asyncio
-async def test_make_pptx_skill_generates_a_real_pptx_file(tmp_path):
-    """Unlike the market-insight skills, make_pptx has no network
-    dependency (pure local file generation via python-pptx), so this runs
-    for real rather than being structural-only."""
-    registry = ToolRegistry()
-    loader = SkillLoader(REAL_SKILLS_STORE, registry)
-    loader.scan_and_register()
-
-    output_path = tmp_path / "demo.pptx"
-    result = await registry.dispatch(
-        "make_pptx",
-        {
-            "output_path": str(output_path),
-            "title": "Test Deck",
-            "slides": [{"title": "Slide One", "bullets": ["Point A", "Point B"]}],
-        },
-    )
-
-    assert output_path.is_file()
-    assert output_path.stat().st_size > 1000  # a real .pptx zip archive, not an empty/error stub
-    assert "demo.pptx" in result
-
-
-@pytest.mark.asyncio
 async def test_non_ascii_skill_output_is_not_corrupted(tmp_path):
     """Regression test: on Windows, a child process's stdout piped (not a
     real console) does not default to UTF-8 — it falls back to the system
     codepage (e.g. GBK), silently corrupting any non-ASCII output into
     replacement characters unless PYTHONIOENCODING is forced. This is
     real corruption of the Observation text/JSONL log, not just a
-    terminal rendering artifact — reproduced with make_pptx's Chinese
+    terminal rendering artifact — reproduced with a skill's Chinese
     status message before being fixed."""
     _write_skill(
         tmp_path,
@@ -147,6 +123,45 @@ async def test_nonzero_exit_code_raises_tool_execution_error(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_nonzero_exit_surfaces_stdout_not_just_stderr(tmp_path):
+    """Regression test for a real bug: several skills print their own
+    structured error detail to STDOUT before sys.exit(1), following the
+    same convention the success path already uses (stdout is the result).
+    The old error message only ever showed stderr, silently discarding
+    that detail and leaving a bare, unexplained "exited with code 1"."""
+    _write_skill(
+        tmp_path,
+        "prints_json_error",
+        skill_md="---\nname: prints_json_error\ndescription: fails after printing to stdout\n---\nbody\n",
+        run_py="import sys\nprint('{\"error\": \"something specific went wrong\"}')\nsys.exit(1)",
+    )
+    registry = ToolRegistry()
+    loader = SkillLoader(tmp_path, registry)
+    loader.scan_and_register()
+
+    with pytest.raises(ToolExecutionError, match="something specific went wrong"):
+        await registry.dispatch("prints_json_error", {})
+
+
+@pytest.mark.asyncio
+async def test_nonzero_exit_with_both_streams_shows_both(tmp_path):
+    _write_skill(
+        tmp_path,
+        "both_streams",
+        skill_md="---\nname: both_streams\ndescription: writes to both streams then fails\n---\nbody\n",
+        run_py="import sys\nprint('stdout detail')\nsys.stderr.write('stderr detail')\nsys.exit(1)",
+    )
+    registry = ToolRegistry()
+    loader = SkillLoader(tmp_path, registry)
+    loader.scan_and_register()
+
+    with pytest.raises(ToolExecutionError) as exc_info:
+        await registry.dispatch("both_streams", {})
+    assert "stdout detail" in str(exc_info.value)
+    assert "stderr detail" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_timeout_kills_process_and_raises(tmp_path):
     _write_skill(
         tmp_path,
@@ -189,10 +204,10 @@ async def test_register_one_registers_a_single_directory_directly(tmp_path):
 
 @pytest.mark.asyncio
 async def test_workspace_root_is_injected_as_an_env_var_when_configured(tmp_path):
-    # Real bug this guards against: make_pptx (and any future skill that
-    # writes user-facing output files) needs to know where "the workspace"
-    # is, since its subprocess cwd is its OWN directory, not that -- see
-    # skill_loader.py's module docstring.
+    # Real bug this guards against: a skill that writes user-facing output
+    # files needs to know where "the workspace" is, since its subprocess
+    # cwd is its OWN directory, not that -- see skill_loader.py's module
+    # docstring.
     workspace = tmp_path / "workspace"
     store = tmp_path / "store"
     _write_skill(
@@ -234,71 +249,6 @@ async def test_workspace_root_env_var_is_absent_when_not_configured(tmp_path):
     result = await registry.dispatch("echo_workspace_root", {})
 
     assert result == "(not set)"
-
-
-@pytest.mark.asyncio
-async def test_make_pptx_saves_within_the_workspace_root_not_its_own_skill_directory(tmp_path):
-    # Regression test for the real bug: make_pptx used to save relative to
-    # its own skills_store/make_pptx/ directory (the subprocess cwd),
-    # invisible to tools/files/file_tool.py's workspace-scoped tools, and
-    # crashed outright for any output_path with a subdirectory (python-pptx
-    # doesn't create missing parent directories).
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    registry = ToolRegistry()
-    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=SwappableWorkspaceRoot(workspace))
-    loader.scan_and_register()
-
-    result = await registry.dispatch(
-        "make_pptx",
-        {
-            "output_path": "reports/deck.pptx",  # a subdirectory that does not exist yet
-            "title": "Test Deck",
-            "slides": [{"title": "Slide One", "bullets": ["Point A", "Point B"]}],
-        },
-    )
-
-    saved_path = workspace / "reports" / "deck.pptx"
-    assert saved_path.is_file()
-    assert saved_path.stat().st_size > 1000  # a real .pptx zip archive, not an empty/error stub
-    assert "reports/deck.pptx" in result
-    # And it must NOT have landed next to run.py, the pre-fix location.
-    assert not (REAL_SKILLS_STORE / "make_pptx" / "reports").exists()
-
-
-@pytest.mark.asyncio
-async def test_make_pptx_rejects_a_path_traversal_output_path(tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    registry = ToolRegistry()
-    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=SwappableWorkspaceRoot(workspace))
-    loader.scan_and_register()
-
-    with pytest.raises(ToolExecutionError) as exc_info:
-        await registry.dispatch(
-            "make_pptx",
-            {"output_path": "../escaped.pptx", "title": "x", "slides": []},
-        )
-    assert "outside the workspace sandbox" in str(exc_info.value)
-    assert not (tmp_path / "escaped.pptx").exists()
-
-
-@pytest.mark.asyncio
-async def test_make_pptx_rejects_an_absolute_output_path(tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    registry = ToolRegistry()
-    loader = SkillLoader(REAL_SKILLS_STORE, registry, workspace_root=SwappableWorkspaceRoot(workspace))
-    loader.scan_and_register()
-
-    absolute_target = tmp_path / "elsewhere.pptx"
-    with pytest.raises(ToolExecutionError) as exc_info:
-        await registry.dispatch(
-            "make_pptx",
-            {"output_path": str(absolute_target), "title": "x", "slides": []},
-        )
-    assert "Absolute paths are not allowed" in str(exc_info.value)
-    assert not absolute_target.exists()
 
 
 def test_register_one_raises_on_bad_manifest_instead_of_silently_skipping(tmp_path):

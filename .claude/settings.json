@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest *)",
+      "Bash(.venv/Scripts/python -m pytest *)",
+      "Bash(./.venv/Scripts/python.exe -m pytest *)",
+      "Bash(curl -s https://registry.modelcontextprotocol.io/*)",
+      "Bash(python main.py)",
+      "Bash(.venv/Scripts/python main.py)",
+      "Bash(git check-ignore *)"
+    ]
+  }
+}

@@ -53,7 +53,12 @@ async def main() -> None:
                     print(f"[ERROR] {type(exc).__name__}: {exc}")
                 continue
             try:
-                await ctx.orchestrator.run(user_input, history=history)
+                # Shared with tools/scheduler/scheduler_loop.py's own
+                # runs -- guarantees a background scheduled task never
+                # fires mid-turn and fights over workspace_root/
+                # active_project with what's being typed here right now.
+                async with ctx.run_lock:
+                    await ctx.orchestrator.run(user_input, history=history)
             except Exception as exc:  # noqa: BLE001 - keep the REPL alive on unexpected errors
                 print(f"[ERROR] {type(exc).__name__}: {exc}")
     finally:

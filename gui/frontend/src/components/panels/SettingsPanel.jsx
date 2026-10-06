@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../api/rest'
+import { applyTheme, getStoredTheme } from '../../lib/theme'
 
 export default function SettingsPanel() {
   const [config, setConfig] = useState(null)
@@ -10,6 +11,14 @@ export default function SettingsPanel() {
   const [model, setModel] = useState('')
   const [keyProvider, setKeyProvider] = useState('anthropic')
   const [keyValue, setKeyValue] = useState('')
+
+  // Appearance: purely client-side (see lib/theme.js) -- no REST call, no
+  // server-side state to keep in sync.
+  const [theme, setTheme] = useState(getStoredTheme)
+  const chooseTheme = (next) => {
+    setTheme(next)
+    applyTheme(next)
+  }
 
   const refresh = () => api.getConfig().then(setConfig).catch((e) => setError(e.message))
 
@@ -54,6 +63,27 @@ export default function SettingsPanel() {
       )}
       {error && <div className="panel-error">{error}</div>}
       {notice && <div className="panel-notice">{notice}</div>}
+
+      <section className="panel-section">
+        <h3>Appearance</h3>
+        <div className="theme-toggle">
+          <button
+            type="button"
+            className={`theme-option ${theme === 'light' ? 'active' : ''}`}
+            onClick={() => chooseTheme('light')}
+          >
+            Light
+          </button>
+          <button
+            type="button"
+            className={`theme-option ${theme === 'dark' ? 'active' : ''}`}
+            onClick={() => chooseTheme('dark')}
+          >
+            Dark
+          </button>
+        </div>
+        <p className="panel-hint">Saved in this browser only. Default is Light.</p>
+      </section>
 
       <section className="panel-section">
         <h3>Switch provider</h3>

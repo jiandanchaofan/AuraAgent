@@ -15,7 +15,7 @@ from config.settings import Settings, load_settings
 def _base_kwargs(tmp_path, **overrides):
     kwargs = dict(
         ANTHROPIC_API_KEY="test-key",
-        notes_sandbox_root=tmp_path / "notes",
+        AURA_NOTES_SANDBOX_ROOT=tmp_path / "notes",
         calendar_events_file=tmp_path / "calendar" / "events.json",
         tasks_file=tmp_path / "tasks" / "tasks.json",
         memory_file=tmp_path / "memory" / "facts.json",

@@ -21,7 +21,7 @@ from tests.fakes import FakeConfirmationChannel
 def _test_settings(tmp_path) -> Settings:
     return Settings(
         ANTHROPIC_API_KEY="test-key",
-        notes_sandbox_root=tmp_path / "notes",
+        AURA_NOTES_SANDBOX_ROOT=tmp_path / "notes",
         calendar_events_file=tmp_path / "calendar" / "events.json",
         tasks_file=tmp_path / "tasks" / "tasks.json",
         memory_file=tmp_path / "memory" / "facts.json",
@@ -30,6 +30,8 @@ def _test_settings(tmp_path) -> Settings:
         AURA_WORKSPACE_ROOT=tmp_path / "workspace",
         projects_dir=tmp_path / "projects",
         project_meta_dir=tmp_path / "project_meta",
+        devices_file=tmp_path / "devices" / "registry.json",
+        personal_graph_db_file=tmp_path / "personal_graph" / "graph.db",
         _env_file=None,
         # agents_config_path / mcp_config_path / skills_dir deliberately
         # left at their real project defaults, so this exercises the real
@@ -106,13 +108,17 @@ async def test_build_app_context_orchestrator_is_runnable(tmp_path):
 async def test_build_app_context_confirmation_channel_is_reused_everywhere(tmp_path):
     """The SAME confirmation_channel instance passed in must be the one
     every gated tool (calendar/task/file delete, all six self-extension
-    tools) actually uses -- not a fresh one built internally."""
+    tools) actually uses -- not a fresh one built internally. AppContext
+    wraps it in a SwappableConfirmationChannel (see
+    confirmation/swappable_channel.py -- needed so tools/scheduler/ can
+    auto-decline confirmations during an unattended run), so the identity
+    check is against `.current`, not the field itself."""
     logger = AuraLogger([_RecordingSink()])
     confirmation = FakeConfirmationChannel(decision=True)
 
     ctx = await build_app_context(_test_settings(tmp_path), confirmation, logger)
     try:
-        assert ctx.confirmation_channel is confirmation
+        assert ctx.confirmation_channel.current is confirmation
         await ctx.registry.dispatch("write_file", {"path": "a.txt", "content": "x"})
         await ctx.registry.dispatch("delete_file", {"path": "a.txt"})
         assert len(confirmation.requests) == 1
@@ -137,5 +143,53 @@ async def test_build_app_context_wires_project_support(tmp_path):
         assert ctx.cli_context.project_store is ctx.project_store
         assert ctx.cli_context.leader_engine is ctx.leader_engine
         assert "update_project_summary" in {s.name for s in ctx.leader_view.get_tool_specs()}
+    finally:
+        await ctx.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_app_context_wires_scheduler_support(tmp_path):
+    """N8 proactivity: schedule_store/run_lock/scheduler_task must all be
+    present, the scheduler's background task must actually be running,
+    propose_scheduled_task must be visible to the Leader, and
+    cli_context.schedule_store must be the SAME instance (not a second
+    one) so /schedule (cli/commands.py) manages the schedules the
+    scheduler loop actually reads."""
+    logger = AuraLogger([_RecordingSink()])
+    confirmation = FakeConfirmationChannel(decision=True)
+
+    ctx = await build_app_context(_test_settings(tmp_path), confirmation, logger)
+    try:
+        assert ctx.scheduler_task is not None
+        assert not ctx.scheduler_task.done()
+        assert ctx.cli_context.schedule_store is ctx.schedule_store
+        assert "propose_scheduled_task" in {s.name for s in ctx.leader_view.get_tool_specs()}
+        # A fresh, empty store -- nothing scheduled yet.
+        assert await ctx.schedule_store.list_schedules() == []
+    finally:
+        await ctx.aclose()
+    assert ctx.scheduler_task.cancelled() or ctx.scheduler_task.done()
+
+
+@pytest.mark.asyncio
+async def test_build_app_context_confirmation_channel_supports_swapping(tmp_path):
+    """The wrapped SwappableConfirmationChannel must be a genuinely live
+    indirection: swapping .current changes what every gated tool
+    actually uses, exactly as tools/scheduler/scheduler_loop.py relies on
+    for its own temporary auto-decline swap."""
+    logger = AuraLogger([_RecordingSink()])
+    confirmation = FakeConfirmationChannel(decision=True)
+
+    ctx = await build_app_context(_test_settings(tmp_path), confirmation, logger)
+    try:
+        replacement = FakeConfirmationChannel(decision=False)
+        ctx.confirmation_channel.set_current(replacement)
+
+        await ctx.registry.dispatch("write_file", {"path": "a.txt", "content": "x"})
+        result = await ctx.registry.dispatch("delete_file", {"path": "a.txt"})
+
+        assert "declined" in result.lower()
+        assert len(replacement.requests) == 1
+        assert len(confirmation.requests) == 0  # the original never saw it
     finally:
         await ctx.aclose()

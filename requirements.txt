@@ -8,9 +8,10 @@ rich>=13.7
 pyfiglet>=1.0
 httpx>=0.27
 mcp>=2.0
-python-pptx>=1.0  # used by skills_store/make_pptx (a self-extension-generated skill)
+python-pptx>=1.0  # tools/documents/pptx_tool.py — read/create/edit PowerPoint decks
 fastapi>=0.115  # gui/ backend — shared composition root (core/bootstrap.py) served over a WebSocket
 uvicorn[standard]>=0.30  # ASGI server for gui/server.py; the [standard] extra brings websockets support
+python-multipart>=0.0.9  # gui/routes.py — required by FastAPI's UploadFile/Form for the Project files-upload endpoint
 pywebview>=5.0  # gui_app.py's desktop window (Epic M4) — wraps gui/server.py's app in a native OS WebView
 pyperclip>=1.9  # tools/system/clipboard_tool.py (Epic L2) — cross-platform clipboard read/write
 mss>=9.0  # tools/system/screenshot_tool.py (Epic L2) — cross-platform screen capture
@@ -18,9 +19,16 @@ psutil>=5.9  # tools/system/process_tool.py (Epic L2) — cross-platform process
 plyer>=2.1  # tools/system/notification_tool.py (Epic L2) — cross-platform desktop notifications
 google-auth>=2.30  # tools/calendar/google_auth.py — OAuth Credentials/token-refresh bookkeeping; Calendar API v3 itself is called directly via httpx REST, not google-api-python-client
 google-auth-oauthlib>=1.2  # tools/calendar/google_auth.py — InstalledAppFlow local-loopback OAuth consent flow
+croniter>=2.0  # tools/scheduler/ — correct next-run-time math for recurring schedules (month-end/leap-year edge cases are a real correctness pitfall, not worth hand-rolling)
+python-docx>=1.1  # tools/documents/docx_tool.py — read/create/edit Word documents
+openpyxl>=3.1  # tools/documents/xlsx_tool.py — read/create/edit Excel workbooks
+pypdf>=5.0  # tools/documents/pdf_tool.py — read-only PDF text extraction
+uuid6>=2024.1  # tools/personal_graph/ — UUIDv7 generation to match Auralis's own id scheme (Python 3.11 has no built-in uuid.uuid7(), that's 3.14+; same-millisecond monotonicity/bit-layout correctness isn't worth hand-rolling)
+python-telegram-bot>=21.0  # telegram_bot.py, tg_bot/ — Telegram Bot API client (long-polling); chosen over aiogram/pyTelegramBotAPI for its actively-maintained async-native Application with post_init/post_shutdown hooks that slot straight into this project's existing asyncio composition root
 
 # --- dev / test only ---
 pytest>=8.0
 pytest-asyncio>=0.23
+pytest-xdist>=3.6  # parallel test runs (`pytest tests/ -n auto`) — the full suite is ~830 tests, serial by default
 # httpx (already a main dependency above) also doubles as FastAPI's own
 # recommended test client via httpx.ASGITransport — no extra package needed.

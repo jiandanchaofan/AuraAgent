@@ -32,6 +32,7 @@ from core.exceptions import ToolExecutionError
 from tools.base import ToolSpec
 from tools.registry import ToolRegistry
 from tools.sandbox_path import resolve_within_sandbox
+from tools.text_patch import apply_str_replace
 from tools.workspace_root import SwappableWorkspaceRoot
 
 # A conservative guess at "this is probably not text" — read_file refuses
@@ -89,10 +90,19 @@ def register_file_tools(
     async def write_file(args: dict[str, Any]) -> str:
         path = resolve_within_sandbox(workspace_root.current, args["path"])
         mode = args.get("mode", "create_only")
-        if mode not in ("create_only", "overwrite"):
-            raise ToolExecutionError(f"Unknown mode '{mode}' (expected 'create_only' or 'overwrite').")
+        if mode not in ("create_only", "overwrite", "str_replace"):
+            raise ToolExecutionError(f"Unknown mode '{mode}' (expected 'create_only', 'overwrite', or 'str_replace').")
         if mode == "create_only" and path.exists():
             raise ToolExecutionError(f"'{args['path']}' already exists (use mode='overwrite' to replace it).")
+        if mode == "str_replace":
+            if not path.is_file():
+                raise ToolExecutionError(f"File not found: '{args['path']}' (str_replace requires an existing file).")
+            old_str, new_str = args.get("old_str"), args.get("new_str")
+            if old_str is None or new_str is None:
+                raise ToolExecutionError("mode='str_replace' requires both old_str and new_str.")
+            current = path.read_text(encoding="utf-8")
+            path.write_text(apply_str_replace(current, old_str, new_str), encoding="utf-8")
+            return f"Wrote '{args['path']}' (mode={mode})."
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args.get("content", ""), encoding="utf-8")
         return f"Wrote '{args['path']}' (mode={mode})."
@@ -212,13 +222,33 @@ def register_file_tools(
     registry.register(
         ToolSpec(
             name="write_file",
-            description="Create or overwrite a text file in the workspace. mode='create_only' (default) fails if it already exists; mode='overwrite' replaces it.",
+            description=(
+                "Create, overwrite, or incrementally patch a text file in the workspace. mode='create_only' "
+                "(default) fails if it already exists; mode='overwrite' replaces it entirely; "
+                "mode='str_replace' (old_str/new_str) replaces one exact, unique piece of text in an existing "
+                "file in place -- prefer this for an incremental edit to a large file instead of overwriting it whole."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path relative to the workspace."},
-                    "content": {"type": "string", "description": "Text content to write."},
-                    "mode": {"type": "string", "enum": ["create_only", "overwrite"], "description": "Defaults to 'create_only'."},
+                    "content": {
+                        "type": "string",
+                        "description": "Text content to write -- required for mode='create_only'/'overwrite', unused for 'str_replace'.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["create_only", "overwrite", "str_replace"],
+                        "description": "Defaults to 'create_only'.",
+                    },
+                    "old_str": {
+                        "type": "string",
+                        "description": "mode='str_replace' only: the exact text to replace -- must match exactly once in the file.",
+                    },
+                    "new_str": {
+                        "type": "string",
+                        "description": "mode='str_replace' only: the replacement text.",
+                    },
                 },
                 "required": ["path"],
             },

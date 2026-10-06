@@ -5,6 +5,10 @@
 // a screen capture exposes whatever's on screen, a different risk shape
 // than data loss, hence its own color rather than reusing destructive's)
 // are separate, non-self-extension tiers used elsewhere in the codebase.
+// `recurring_autonomy` (propose_scheduled_task, N8) is a third: not "will
+// this one action cause harm" but "should this run unattended, possibly
+// repeatedly, without asking again each time" -- its own color, distinct
+// from both the danger-red tiers and privacy_exposure's purple.
 export const RISK_LABELS = {
   capability_grant: 'Capability Grant',
   code_execution: 'Code Execution',
@@ -12,6 +16,7 @@ export const RISK_LABELS = {
   arbitrary_execution: 'Arbitrary Execution',
   destructive: 'Destructive',
   privacy_exposure: 'Privacy Exposure',
+  recurring_autonomy: 'Recurring Autonomy',
 }
 
 export const RISK_COLORS = {
@@ -21,6 +26,7 @@ export const RISK_COLORS = {
   arbitrary_execution: '#d43f3f',
   destructive: '#d43f3f',
   privacy_exposure: '#8b5cf6',
+  recurring_autonomy: '#0e9488',
 }
 
 export function riskColor(riskLevel) {

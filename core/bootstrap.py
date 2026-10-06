@@ -39,6 +39,7 @@ from agents.scoped_tool_registry import ScopedToolRegistryView
 from cli.context import CLIContext
 from config.settings import Settings
 from confirmation.base import ConfirmationChannel
+from confirmation.swappable_channel import SwappableConfirmationChannel
 from core.logger import AuraLogger
 from core.react_engine import AsyncReActEngine
 from mcp_integration.mcp_client_manager import MCPClientManager
@@ -55,16 +56,26 @@ from tools.calendar.google_auth import load_credentials as load_google_credentia
 from tools.calendar.google_calendar_provider import GoogleCalendarProvider
 from tools.calendar.local_json_calendar import LocalJSONCalendarProvider
 from tools.calendar.swappable_calendar_provider import SwappableCalendarProvider
+from tools.devices.device_store import DeviceStore
 from tools.files.file_tool import register_file_tools
+from tools.personal_graph.graph_store import GraphStore
+from tools.personal_graph.graph_tool import register_personal_graph_tools
+from tools.documents.pdf_tool import register_pdf_tools
+from tools.documents.docx_tool import register_docx_tools
+from tools.documents.pptx_tool import register_pptx_tools
+from tools.documents.xlsx_tool import register_xlsx_tools
 from tools.human.ask_human_tool import register_ask_human_tools
 from tools.memory.memory_store import MemoryStore
 from tools.memory.memory_tool import register_memory_tools
-from tools.notes.notes_tool import register_notes_tools
+from tools.notes.notes_tool import register_notes_tools, register_quick_note_tool
 from tools.profile.user_profile_store import UserProfileStore
 from tools.profile.user_profile_tool import register_user_profile_tools
 from tools.projects.project_store import ActiveProjectState, ProjectStore
 from tools.projects.project_tool import register_project_tools
 from tools.registry import ToolRegistry
+from tools.scheduler.schedule_store import ScheduleStore
+from tools.scheduler.scheduler_loop import run_scheduler_loop
+from tools.scheduler.scheduler_tool import register_propose_schedule_tool
 from tools.self_extend.find_capability_tool import register_find_capability_tool
 from tools.self_extend.propose_agent_tool import register_propose_agent_tool
 from tools.self_extend.propose_capability_grant_tool import register_propose_capability_grant_tool
@@ -75,7 +86,11 @@ from tools.system.clipboard_tool import register_clipboard_tools
 from tools.system.notification_tool import register_notification_tools
 from tools.system.process_tool import register_process_tools
 from tools.system.screenshot_tool import register_screenshot_tools
+from tools.tasks.google_task_provider import GoogleTaskProvider
+from tools.tasks.google_tasks_auth import load_credentials as load_google_tasks_credentials
 from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
+from tools.tasks.swappable_task_provider import SwappableTaskProvider
+from tools.tasks.task_provider import TaskProvider
 from tools.tasks.task_tool import register_task_tools
 from tools.web.fetch_url_tool import build_default_http_client, register_fetch_url_tools, register_http_tools
 from tools.workspace_root import SwappableWorkspaceRoot
@@ -96,20 +111,59 @@ class AppContext:
     agents_config_lock: asyncio.Lock
     mcp_config_lock: asyncio.Lock
     known_api_keys: dict[str, str]
-    confirmation_channel: ConfirmationChannel
+    #: Concretely a SwappableConfirmationChannel (not just the abstract
+    #: ConfirmationChannel) -- every confirmation-gated tool is registered
+    #: against this ONE shared instance (see build_app_context()), so
+    #: tools/scheduler/scheduler_loop.py can temporarily swap in an
+    #: AutoDeclineConfirmationChannel for the duration of one unattended
+    #: run and swap back afterward, the same way workspace_root's concrete
+    #: Swappable type is what's annotated here, not an abstract interface.
+    confirmation_channel: SwappableConfirmationChannel
+    #: The directory every workspace-scoped tool reads from right now --
+    #: recomputed fresh at the start of every turn by
+    #: cli/service.py::sync_active_directory(), never mutated directly.
     workspace_root: SwappableWorkspaceRoot
+    #: The persisted fallback default -- see cli/context.py's matching
+    #: field docstring.
+    default_workspace_root: SwappableWorkspaceRoot
     notes_root: SwappableWorkspaceRoot
     calendar_provider: SwappableCalendarProvider
+    #: Real Google Tasks once connected -- see cli/context.py's matching field.
+    task_provider: SwappableTaskProvider
     project_store: ProjectStore
     active_project: ActiveProjectState
     leader_engine: AsyncReActEngine
     base_leader_system_prompt: str
     cli_context: CLIContext
+    #: N8 proactivity: user-defined tasks that run without a human
+    #: re-triggering them, once or on a schedule (tools/scheduler/).
+    schedule_store: ScheduleStore
+    #: N14 (Auralis / remote access) -- see cli/context.py's matching field.
+    device_store: DeviceStore
+    #: Auralis personal-data graph -- see cli/context.py's matching field.
+    graph_store: GraphStore
+    #: Guarantees at most one orchestrator.run() executes at a time,
+    #: process-wide -- held by main.py's REPL loop, gui/server.py's
+    #: _run_orchestrator(), and every scheduled run
+    #: (tools/scheduler/scheduler_loop.py), so a live human turn and a
+    #: background scheduled one can never interleave and fight over the
+    #: shared workspace_root/active_project/system_prompt state.
+    run_lock: asyncio.Lock
+    #: The scheduler's own background poll loop -- set right after this
+    #: AppContext is constructed (it needs a reference to itself), never
+    #: left None in practice. See aclose().
+    scheduler_task: asyncio.Task | None = None
 
     async def aclose(self) -> None:
         """Release resources a frontend's shutdown path must await —
         mirrors main.py's `finally` block, factored out so the GUI
         backend doesn't have to remember the same two calls."""
+        if self.scheduler_task is not None:
+            self.scheduler_task.cancel()
+            try:
+                await self.scheduler_task
+            except asyncio.CancelledError:
+                pass
         await self.http_client.aclose()
         await self.mcp_manager.close_all()
 
@@ -121,10 +175,26 @@ async def build_app_context(
 ) -> AppContext:
     registry = ToolRegistry()
 
+    # Wrapped immediately so every register_*_tools() call below (11 of
+    # them pass this through) closes over the SAME swappable instance,
+    # not the raw channel the caller passed in -- see
+    # confirmation/swappable_channel.py's module docstring for why this
+    # indirection is what lets a scheduled run auto-decline confirmations
+    # for its own duration without touching any tool registration.
+    confirmation_channel = SwappableConfirmationChannel(confirmation_channel)
+
     # Shared mutable indirection (mirrors providers/swappable_provider.py's
-    # exact pattern) so /workspace set (cli/commands.py) can repoint every
-    # workspace-scoped tool at once, at runtime -- see tools/workspace_root.py.
+    # exact pattern) so every workspace-scoped tool can be repointed at
+    # once, at runtime -- see tools/workspace_root.py. This is the LIVE
+    # value every tool reads; cli/service.py::sync_active_directory()
+    # recomputes it fresh before every turn (Project > Chat's own
+    # directory override > default_workspace_root below) rather than
+    # anything mutating it directly and expecting it to stay put.
     workspace_root = SwappableWorkspaceRoot(settings.workspace_root)
+    # The persisted fallback /workspace set actually writes to -- see
+    # cli/context.py's field docstring for why this is a second, separate
+    # instance rather than workspace_root itself.
+    default_workspace_root = SwappableWorkspaceRoot(settings.workspace_root)
     # Same indirection, independent instance, for the notes sandbox -- /notes
     # set can repoint it (e.g. at a real Obsidian vault) without touching
     # workspace_root at all; the two are deliberately unrelated sandboxes.
@@ -151,10 +221,34 @@ async def build_app_context(
     calendar_provider = SwappableCalendarProvider(concrete_calendar, settings.calendar_backend)
     register_calendar_tools(registry, calendar_provider, confirmation_channel)
 
-    task_provider = LocalJSONTaskProvider(settings.tasks_file)
+    # Same SwappableProvider-style indirection as calendar_provider above --
+    # /tasks connect (cli/commands.py) hot-swaps this to a real
+    # GoogleTaskProvider once OAuth succeeds, with zero changes to
+    # task_tool.py (it only ever calls methods on `task_provider`).
+    concrete_tasks: TaskProvider
+    if settings.tasks_backend == "google":
+        # load_settings() already guarantees the token + list id exist and
+        # are valid before the app is allowed to start with tasks_backend=="google".
+        tasks_credentials = load_google_tasks_credentials(settings.google_tasks_token_file)
+        concrete_tasks = GoogleTaskProvider(
+            tasks_credentials, settings.google_tasks_token_file, settings.google_tasks_list_id, http_client
+        )
+    else:
+        concrete_tasks = LocalJSONTaskProvider(settings.tasks_file)
+    task_provider = SwappableTaskProvider(concrete_tasks, settings.tasks_backend)
     register_task_tools(registry, task_provider, confirmation_channel)
 
     register_file_tools(registry, workspace_root, confirmation_channel)
+
+    # Document read/create/edit (PDF/Word/PPTX/Excel) -- native tools, same
+    # "local resource management" ownership as tools/files/ above; reuse
+    # workspace_root directly so they never need a confirmation_channel
+    # (create_*/edit_* follow write_file's own create_only/overwrite
+    # convention instead of a new HITL gate).
+    register_pdf_tools(registry, workspace_root, settings.document_read_max_bytes, settings.document_extract_max_chars)
+    register_docx_tools(registry, workspace_root, settings.document_read_max_bytes, settings.document_extract_max_chars)
+    register_pptx_tools(registry, workspace_root, settings.document_read_max_bytes, settings.document_extract_max_chars)
+    register_xlsx_tools(registry, workspace_root, settings.document_read_max_bytes, settings.document_extract_max_chars)
 
     # Epic L2: system/desktop control -- clipboard/screenshot/process/
     # notification tools, same "local resource management" ownership as
@@ -186,6 +280,28 @@ async def build_app_context(
     )
     active_project = ActiveProjectState()
 
+    # N8 proactivity (tools/scheduler/): user-defined tasks that run
+    # without a human re-triggering them, once or on a schedule. Needs
+    # project_store/active_project (both just built above) to resolve a
+    # schedule's target Project, and the already-wrapped
+    # confirmation_channel so propose_scheduled_task's approval flow goes
+    # through the same swappable instance everything else does.
+    schedule_store = ScheduleStore(settings.project_meta_dir / "schedules.json")
+    register_propose_schedule_tool(registry, schedule_store, project_store, active_project, confirmation_channel)
+
+    # N14 (Auralis / remote access): see tools/devices/device_store.py's
+    # own docstring -- always constructed, inert unless settings
+    # .require_auth actually turns on token checking (gui/auth.py).
+    device_store = DeviceStore(settings.devices_file)
+
+    # Auralis personal-data graph (footprints/persons/projects/links) --
+    # see tools/personal_graph/graph_store.py's own docstring for why this
+    # is SQLite, not another JSON store. Registered here (not deferred
+    # like register_quick_note_tool below) since it only needs
+    # graph_store itself, already built.
+    graph_store = GraphStore(settings.personal_graph_db_file)
+    register_personal_graph_tools(registry, graph_store)
+
     register_calculate_tools(registry)
     register_fetch_url_tools(
         registry, http_client, settings.fetch_url_timeout_seconds, settings.fetch_url_max_bytes
@@ -196,7 +312,13 @@ async def build_app_context(
     )
 
     mcp_manager = MCPClientManager(settings.mcp_config_path, registry)
-    await mcp_manager.connect_all()
+    # workspace_root.current is already resolved at this point (just above)
+    # -- a directory-following MCP server (config/mcp_servers.json's
+    # follow_active_directory) starts out pointed at it, same as every
+    # other workspace-scoped tool; sync_active_directory() reconnects it
+    # to somewhere more specific (a Project/Chat directory) once a turn
+    # actually resolves one.
+    await mcp_manager.connect_all(initial_directory=workspace_root.current)
 
     skill_loader = SkillLoader(
         settings.skills_dir, registry, settings.skill_timeout_seconds, workspace_root=workspace_root
@@ -206,10 +328,17 @@ async def build_app_context(
     concrete_provider: LLMProvider
     if settings.llm_provider == "openai":
         concrete_provider = OpenAIProvider(
-            api_key=settings.openai_api_key, model=settings.model_id, base_url=settings.openai_base_url
+            api_key=settings.openai_api_key,
+            model=settings.model_id,
+            base_url=settings.openai_base_url,
+            max_tokens=settings.llm_max_output_tokens,
         )
     else:
-        concrete_provider = AnthropicProvider(api_key=settings.anthropic_api_key, model=settings.model_id)
+        concrete_provider = AnthropicProvider(
+            api_key=settings.anthropic_api_key,
+            model=settings.model_id,
+            max_tokens=settings.llm_max_output_tokens,
+        )
     # Wrapped in a SwappableProvider so every engine built below (Leader's,
     # every Worker's, and any built later by propose_new_agent or /agents
     # add) shares ONE mutable indirection point — this is what lets the
@@ -255,6 +384,9 @@ async def build_app_context(
     # make_pptx-adoption investigation found (see that module's docstring).
     agents_config_lock = asyncio.Lock()
     mcp_config_lock = asyncio.Lock()
+    # Guards every orchestrator.run() call, live or scheduled -- see
+    # AppContext.run_lock's own docstring.
+    run_lock = asyncio.Lock()
 
     async def grant_access(pattern: str) -> None:
         leader_view.add_allowed_pattern(pattern)
@@ -338,17 +470,41 @@ async def build_app_context(
         http_client=http_client,
         agents_config_lock=agents_config_lock,
         workspace_root=workspace_root,
+        default_workspace_root=default_workspace_root,
         notes_root=notes_root,
+        quick_notes_subdir=settings.quick_notes_subdir,
         calendar_provider=calendar_provider,
+        task_provider=task_provider,
         project_store=project_store,
         active_project=active_project,
         leader_engine=leader_engine,
         base_leader_system_prompt=base_leader_system_prompt,
+        schedule_store=schedule_store,
+        device_store=device_store,
+        graph_store=graph_store,
         known_api_keys=known_api_keys,
         env_file_path=settings.env_file_path,
     )
+    # quick_notes_subdir deliberately lives ONLY on cli_context above, not
+    # duplicated onto AppContext too -- unlike workspace_root/notes_root
+    # (mutable SwappableWorkspaceRoot objects shared by reference between
+    # both), this is a plain str, so a second copy on AppContext would
+    # silently stop tracking /notes quickdir's updates (cli/service.py
+    # mutates cli_context.quick_notes_subdir in place by attribute
+    # assignment, which a second, separately-initialized str field
+    # wouldn't see). gui/server.py reads it via ctx.cli_context
+    # .quick_notes_subdir, fresh, at use time.
 
-    return AppContext(
+    # Registered here (not alongside register_notes_tools() above) because
+    # it needs a zero-arg getter closing over cli_context, which doesn't
+    # exist yet up there -- same "defer the read" reasoning as the
+    # existing get_quick_notes_subdir docstring on register_quick_note_tool
+    # itself. Python closures resolve a free variable at CALL time, not
+    # definition time, so this lambda is safe even though cli_context was
+    # only just assigned a few lines above, inside this same function.
+    register_quick_note_tool(registry, notes_root, lambda: cli_context.quick_notes_subdir)
+
+    ctx = AppContext(
         settings=settings,
         registry=registry,
         agent_registry=agent_registry,
@@ -364,11 +520,25 @@ async def build_app_context(
         known_api_keys=known_api_keys,
         confirmation_channel=confirmation_channel,
         workspace_root=workspace_root,
+        default_workspace_root=default_workspace_root,
         notes_root=notes_root,
         calendar_provider=calendar_provider,
+        task_provider=task_provider,
         project_store=project_store,
         active_project=active_project,
         leader_engine=leader_engine,
         base_leader_system_prompt=base_leader_system_prompt,
         cli_context=cli_context,
+        schedule_store=schedule_store,
+        device_store=device_store,
+        graph_store=graph_store,
+        run_lock=run_lock,
     )
+    # Started here (not left to main.py/gui/server.py to remember) so both
+    # frontends get N8 proactivity "for free" with zero extra wiring --
+    # see run_scheduler_loop()'s own docstring and AppContext.aclose()
+    # for the matching shutdown.
+    ctx.scheduler_task = asyncio.create_task(
+        run_scheduler_loop(ctx, poll_interval_seconds=settings.scheduler_poll_interval_seconds)
+    )
+    return ctx

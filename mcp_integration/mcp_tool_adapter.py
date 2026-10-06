@@ -25,7 +25,11 @@ def adapt_and_register(
     session: ClientSession,
     registry: ToolRegistry,
     server_name: str,
-) -> None:
+) -> str:
+    """Returns the qualified name it registered under, so a caller that
+    needs to unregister it later (mcp_client_manager.py's directory-
+    following reconnect) doesn't have to duplicate this naming
+    convention."""
     qualified_name = f"mcp_{server_name}_{mcp_tool.name}"
 
     async def handler(args: dict[str, Any]) -> str:
@@ -44,3 +48,4 @@ def adapt_and_register(
         ),
         handler,
     )
+    return qualified_name

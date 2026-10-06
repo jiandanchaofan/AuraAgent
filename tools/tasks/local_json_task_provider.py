@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from tools.tasks.task_provider import Task, TaskNotFoundError, TaskProvider
+from tools.tasks.task_provider import UNSET, Task, TaskNotFoundError, TaskProvider
 
 
 class LocalJSONTaskProvider(TaskProvider):
@@ -43,6 +43,7 @@ class LocalJSONTaskProvider(TaskProvider):
             done=raw.get("done", False),
             created_at=raw["created_at"],
             completed_at=raw.get("completed_at"),
+            due=raw.get("due"),
         )
 
     async def list_tasks(self, include_completed: bool = True) -> list[Task]:
@@ -59,7 +60,7 @@ class LocalJSONTaskProvider(TaskProvider):
                     return self._to_task(raw)
             raise TaskNotFoundError(f"Task id '{task_id}' not found")
 
-    async def create_task(self, title: str, notes: str | None = None) -> Task:
+    async def create_task(self, title: str, notes: str | None = None, due: str | None = None) -> Task:
         async with self._lock:
             raw_tasks = self._load()
             raw = {
@@ -69,18 +70,39 @@ class LocalJSONTaskProvider(TaskProvider):
                 "done": False,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "completed_at": None,
+                "due": due,
             }
             raw_tasks.append(raw)
             self._save(raw_tasks)
             return self._to_task(raw)
 
-    async def complete_task(self, task_id: str) -> Task:
+    async def update_task(
+        self, task_id: str, *, title: str | None = None, notes: Any = UNSET, due: Any = UNSET
+    ) -> Task:
         async with self._lock:
             raw_tasks = self._load()
             for raw in raw_tasks:
                 if raw["id"] == task_id:
-                    raw["done"] = True
-                    raw["completed_at"] = datetime.now(timezone.utc).isoformat()
+                    if title is not None:
+                        raw["title"] = title
+                    if notes is not UNSET:
+                        raw["notes"] = notes
+                    if due is not UNSET:
+                        raw["due"] = due
+                    self._save(raw_tasks)
+                    return self._to_task(raw)
+            raise TaskNotFoundError(f"Task id '{task_id}' not found")
+
+    async def complete_task(self, task_id: str) -> Task:
+        return await self.set_task_done(task_id, True)
+
+    async def set_task_done(self, task_id: str, done: bool) -> Task:
+        async with self._lock:
+            raw_tasks = self._load()
+            for raw in raw_tasks:
+                if raw["id"] == task_id:
+                    raw["done"] = done
+                    raw["completed_at"] = datetime.now(timezone.utc).isoformat() if done else None
                     self._save(raw_tasks)
                     return self._to_task(raw)
             raise TaskNotFoundError(f"Task id '{task_id}' not found")

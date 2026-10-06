@@ -12,6 +12,14 @@ guarding each entire public method's body. Search is a plain
 case-insensitive substring match — the same logic as
 tools/notes/notes_tool.py's search_notes — deliberately not a vector
 store, to stay dependency-light.
+
+Also instantiated per-Project (tools/projects/project_store.py's
+memory_store_for()), pointed at that Project's own facts.json instead of
+the global sandbox/memory/facts.json — same class, no subclassing, just a
+different file path. update_fact()/delete_fact() exist for the
+human-editable half of that ("AI-drafted, user-editable" per the Project
+upgrade this was added for) but work identically for the global instance
+too.
 """
 from __future__ import annotations
 
@@ -70,3 +78,21 @@ class MemoryStore:
                 return facts
             needle = query.lower()
             return [f for f in facts if needle in f.content.lower()]
+
+    async def update_fact(self, fact_id: str, content: str) -> Fact:
+        async with self._lock:
+            raw_facts = self._load()
+            for raw in raw_facts:
+                if raw["id"] == fact_id:
+                    raw["content"] = content
+                    self._save(raw_facts)
+                    return self._to_fact(raw)
+            raise ValueError(f"No such fact '{fact_id}'.")
+
+    async def delete_fact(self, fact_id: str) -> None:
+        async with self._lock:
+            raw_facts = self._load()
+            remaining = [raw for raw in raw_facts if raw["id"] != fact_id]
+            if len(remaining) == len(raw_facts):
+                raise ValueError(f"No such fact '{fact_id}'.")
+            self._save(remaining)

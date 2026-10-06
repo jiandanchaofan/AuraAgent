@@ -18,6 +18,14 @@ sandbox/projects/*
 !sandbox/projects/.gitkeep
 sandbox/project_meta/*
 !sandbox/project_meta/.gitkeep
+sandbox/chat_sessions/*
+!sandbox/chat_sessions/.gitkeep
+sandbox/devices/*
+!sandbox/devices/.gitkeep
+sandbox/personal_graph/*
+!sandbox/personal_graph/.gitkeep
+sandbox/telegram_chat_sessions/*
+!sandbox/telegram_chat_sessions/.gitkeep
 
 logs/*
 !logs/.gitkeep

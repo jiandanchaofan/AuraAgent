@@ -1,5 +1,6 @@
 import Collapsible from './Collapsible'
 import ConfirmationCard from './ConfirmationCard'
+import Markdown from './Markdown'
 import OpenQuestionCard from './OpenQuestionCard'
 
 function ArgsPreview(args) {
@@ -7,12 +8,24 @@ function ArgsPreview(args) {
   return s.length > 60 ? `${s.slice(0, 60)}…` : s
 }
 
+function TextPreview(text, maxLen = 70) {
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  return oneLine.length > maxLen ? `${oneLine.slice(0, maxLen)}…` : oneLine
+}
+
 function ThoughtBlock({ node }) {
   return (
-    <div className="block thought-block">
-      <span className="block-icon">💭</span>
-      <span className="block-text">{node.text}</span>
-    </div>
+    <Collapsible
+      tone="thought"
+      summary={
+        <span>
+          <span className="block-icon">💭</span>
+          <span className="thought-preview">{TextPreview(node.text)}</span>
+        </span>
+      }
+    >
+      <Markdown className="thought-text">{node.text}</Markdown>
+    </Collapsible>
   )
 }
 
@@ -62,7 +75,7 @@ function DelegationBlock({ node, onRespond }) {
       {node.observation && (
         <div className="delegation-result">
           <span className="block-icon">✅</span>
-          {node.finalAnswer || node.observation.content}
+          <Markdown className="delegation-answer-text">{node.finalAnswer || node.observation.content}</Markdown>
         </div>
       )}
     </Collapsible>

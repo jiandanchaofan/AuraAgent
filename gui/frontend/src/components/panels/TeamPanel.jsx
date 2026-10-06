@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../api/rest'
 
-export default function TeamPanel() {
+export default function TeamPanel({ onChanged }) {
   const [agents, setAgents] = useState([])
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
@@ -10,7 +10,14 @@ export default function TeamPanel() {
   const [systemPrompt, setSystemPrompt] = useState('')
   const [capsRaw, setCapsRaw] = useState('')
 
-  const refresh = () => api.getAgents().then(setAgents).catch((e) => setError(e.message))
+  const refresh = () =>
+    api
+      .getAgents()
+      .then((a) => {
+        setAgents(a)
+        onChanged?.(a)
+      })
+      .catch((e) => setError(e.message))
 
   useEffect(() => {
     refresh()

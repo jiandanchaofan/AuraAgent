@@ -94,3 +94,48 @@ async def test_complete_missing_task_raises_tool_execution_error(provider):
 
     with pytest.raises(ToolExecutionError):
         await registry.dispatch("complete_task", {"task_id": "nonexistent"})
+
+
+@pytest.mark.asyncio
+async def test_update_task_edits_title_and_notes(provider):
+    registry = ToolRegistry()
+    register_task_tools(registry, provider, FakeConfirmationChannel(decision=True))
+    task_id = await _create_task(registry)
+
+    result = await registry.dispatch("update_task", {"task_id": task_id, "title": "New title", "notes": "extra"})
+
+    assert "Updated" in result
+    fetched = await provider.get_task(task_id)
+    assert fetched.title == "New title"
+    assert fetched.notes == "extra"
+
+
+@pytest.mark.asyncio
+async def test_update_task_missing_task_raises_tool_execution_error(provider):
+    registry = ToolRegistry()
+    register_task_tools(registry, provider, FakeConfirmationChannel(decision=True))
+
+    with pytest.raises(ToolExecutionError):
+        await registry.dispatch("update_task", {"task_id": "nonexistent", "title": "x"})
+
+
+@pytest.mark.asyncio
+async def test_set_task_done_toggles_both_directions(provider):
+    registry = ToolRegistry()
+    register_task_tools(registry, provider, FakeConfirmationChannel(decision=True))
+    task_id = await _create_task(registry)
+
+    done_result = await registry.dispatch("set_task_done", {"task_id": task_id, "done": True})
+    assert "now done" in done_result
+
+    reopened_result = await registry.dispatch("set_task_done", {"task_id": task_id, "done": False})
+    assert "now not done" in reopened_result
+
+
+@pytest.mark.asyncio
+async def test_set_task_done_missing_task_raises_tool_execution_error(provider):
+    registry = ToolRegistry()
+    register_task_tools(registry, provider, FakeConfirmationChannel(decision=True))
+
+    with pytest.raises(ToolExecutionError):
+        await registry.dispatch("set_task_done", {"task_id": "nonexistent", "done": True})

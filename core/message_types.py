@@ -40,6 +40,18 @@ class ConversationTurn:
       - role="assistant", raw=...           -> the provider's own content blocks,
                                                 kept verbatim so the same provider
                                                 can round-trip its native format
+      - role="assistant", text=...          -> a resumed chat session's reconstructed
+                                                turn (gui/server.py's
+                                                _history_from_events -- no raw
+                                                provider message survives a restart,
+                                                only the final text). Both
+                                                LLMProvider implementations'
+                                                _translate_history() fall back to
+                                                plain {"role": "assistant", "content":
+                                                text} when `raw` is None -- see the
+                                                real bug that comment documents if
+                                                you're tempted to assume `raw` is
+                                                always set for an assistant turn.
     """
 
     role: Literal["user", "assistant"]

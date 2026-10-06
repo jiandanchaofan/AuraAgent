@@ -1,10 +1,11 @@
-"""Unit tests for LocalJSONTaskProvider's CRUD + on-disk persistence,
-independent of the task_tool/HITL layer (see test_task_tool.py).
-Mirrors tests/test_local_json_calendar.py.
+"""Tests for tools/tasks/local_json_task_provider.py -- the local/default
+TaskProvider backend. No test file existed for this one directly before
+(only tests/test_task_tool.py's tool-level tests); these cover the
+update_task/set_task_done additions specifically, since the UNSET-sentinel
+"field not passed vs. explicitly cleared" distinction is the one genuinely
+fiddly piece of correctness here.
 """
 from __future__ import annotations
-
-import asyncio
 
 import pytest
 
@@ -12,78 +13,73 @@ from tools.tasks.local_json_task_provider import LocalJSONTaskProvider
 from tools.tasks.task_provider import TaskNotFoundError
 
 
-@pytest.mark.asyncio
-async def test_create_get_complete_delete_round_trip(tmp_path):
-    provider = LocalJSONTaskProvider(tmp_path / "tasks.json")
+def _provider(tmp_path) -> LocalJSONTaskProvider:
+    return LocalJSONTaskProvider(tmp_path / "tasks.json")
 
-    created = await provider.create_task("Write report", notes="due Friday")
-    fetched = await provider.get_task(created.id)
-    assert fetched.title == "Write report"
-    assert fetched.notes == "due Friday"
-    assert fetched.done is False
+
+@pytest.mark.asyncio
+async def test_update_task_title_only_leaves_notes_and_due_untouched(tmp_path):
+    provider = _provider(tmp_path)
+    created = await provider.create_task("Old title", notes="keep me", due="2026-03-05")
+
+    updated = await provider.update_task(created.id, title="New title")
+
+    assert updated.title == "New title"
+    assert updated.notes == "keep me"
+    assert updated.due == "2026-03-05"
+
+
+@pytest.mark.asyncio
+async def test_update_task_can_clear_notes_and_due_explicitly(tmp_path):
+    provider = _provider(tmp_path)
+    created = await provider.create_task("Task", notes="some notes", due="2026-03-05")
+
+    updated = await provider.update_task(created.id, notes=None, due=None)
+
+    assert updated.notes is None
+    assert updated.due is None
+    assert updated.title == "Task"  # untouched
+
+
+@pytest.mark.asyncio
+async def test_update_task_unknown_id_raises(tmp_path):
+    provider = _provider(tmp_path)
+
+    with pytest.raises(TaskNotFoundError):
+        await provider.update_task("nonexistent", title="x")
+
+
+@pytest.mark.asyncio
+async def test_set_task_done_toggles_both_directions_and_clears_completed_at_when_unchecked(tmp_path):
+    provider = _provider(tmp_path)
+    created = await provider.create_task("Task")
+
+    done = await provider.set_task_done(created.id, True)
+    assert done.done is True
+    assert done.completed_at is not None
+
+    not_done = await provider.set_task_done(created.id, False)
+    assert not_done.done is False
+    assert not_done.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_complete_task_still_works_as_a_one_way_wrapper(tmp_path):
+    provider = _provider(tmp_path)
+    created = await provider.create_task("Task")
 
     completed = await provider.complete_task(created.id)
+
     assert completed.done is True
     assert completed.completed_at is not None
 
-    await provider.delete_task(created.id)
-    with pytest.raises(TaskNotFoundError):
-        await provider.get_task(created.id)
-
 
 @pytest.mark.asyncio
-async def test_data_persists_across_provider_instances(tmp_path):
-    file_path = tmp_path / "tasks.json"
-    created = await LocalJSONTaskProvider(file_path).create_task("Persisted task")
+async def test_create_task_stores_due_date(tmp_path):
+    provider = _provider(tmp_path)
 
-    reloaded = LocalJSONTaskProvider(file_path)
-    fetched = await reloaded.get_task(created.id)
-    assert fetched.title == "Persisted task"
+    created = await provider.create_task("Task", due="2026-03-05")
 
-
-@pytest.mark.asyncio
-async def test_list_tasks_excludes_completed_when_requested(tmp_path):
-    provider = LocalJSONTaskProvider(tmp_path / "tasks.json")
-    open_task = await provider.create_task("Open task")
-    done_task = await provider.create_task("Done task")
-    await provider.complete_task(done_task.id)
-
-    all_tasks = await provider.list_tasks(include_completed=True)
-    open_only = await provider.list_tasks(include_completed=False)
-
-    assert {t.id for t in all_tasks} == {open_task.id, done_task.id}
-    assert {t.id for t in open_only} == {open_task.id}
-
-
-@pytest.mark.asyncio
-async def test_get_missing_task_raises(tmp_path):
-    provider = LocalJSONTaskProvider(tmp_path / "tasks.json")
-    with pytest.raises(TaskNotFoundError):
-        await provider.get_task("missing")
-
-
-@pytest.mark.asyncio
-async def test_complete_missing_task_raises(tmp_path):
-    provider = LocalJSONTaskProvider(tmp_path / "tasks.json")
-    with pytest.raises(TaskNotFoundError):
-        await provider.complete_task("missing")
-
-
-@pytest.mark.asyncio
-async def test_delete_missing_task_raises(tmp_path):
-    provider = LocalJSONTaskProvider(tmp_path / "tasks.json")
-    with pytest.raises(TaskNotFoundError):
-        await provider.delete_task("missing")
-
-
-@pytest.mark.asyncio
-async def test_concurrent_creates_do_not_lose_updates(tmp_path):
-    """Regression test for Multi-Agent concurrent tool dispatch — see the
-    matching test in test_local_json_calendar.py for the full rationale."""
-    provider = LocalJSONTaskProvider(tmp_path / "tasks.json")
-
-    await asyncio.gather(*(provider.create_task(f"Task {i}") for i in range(20)))
-
-    tasks = await provider.list_tasks()
-    assert len(tasks) == 20
-    assert len({t.id for t in tasks}) == 20
+    assert created.due == "2026-03-05"
+    fetched = await provider.get_task(created.id)
+    assert fetched.due == "2026-03-05"

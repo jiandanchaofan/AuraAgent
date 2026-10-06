@@ -172,6 +172,46 @@ def test_add_allowed_pattern_does_not_mutate_the_caller_supplied_list(shared_reg
 
 
 @pytest.mark.asyncio
+async def test_set_dynamic_patterns_widens_visibility_and_dispatch(shared_registry):
+    """Backs the Project-scoped Skill/MCP mechanism (cli/service.py's
+    use_project()): a project's enabled_tools become visible/callable
+    without needing to be predicted by the view's static capabilities."""
+    view = ScopedToolRegistryView(shared_registry, ["*task*"])
+    assert "fetch_url" not in {s.name for s in view.get_tool_specs()}
+
+    view.set_dynamic_patterns(["fetch_url"])
+
+    assert "fetch_url" in {s.name for s in view.get_tool_specs()}
+    assert await view.dispatch("fetch_url", {}) == "ok"
+
+
+def test_set_dynamic_patterns_replaces_wholesale_not_accretes(shared_registry):
+    """Unlike add_allowed_pattern's permanent, additive grants,
+    set_dynamic_patterns must fully replace the previous list -- exiting
+    a project (called with []) must not leave a prior project's grants
+    dangling."""
+    view = ScopedToolRegistryView(shared_registry, ["*task*"])
+    view.set_dynamic_patterns(["fetch_url"])
+    assert view.is_allowed("fetch_url") is True
+
+    view.set_dynamic_patterns([])
+
+    assert view.is_allowed("fetch_url") is False
+
+
+@pytest.mark.asyncio
+async def test_set_dynamic_patterns_does_not_affect_static_allowed_patterns(shared_registry):
+    """Switching projects (a second set_dynamic_patterns call) must never
+    retract the view's own baseline config/agents.json capabilities."""
+    view = ScopedToolRegistryView(shared_registry, ["*task*"])
+    view.set_dynamic_patterns(["fetch_url"])
+    view.set_dynamic_patterns([])  # simulates leaving that project
+
+    assert view.is_allowed("create_task") is True
+    assert await view.dispatch("create_task", {}) == "ok"
+
+
+@pytest.mark.asyncio
 async def test_shared_registry_state_is_visible_across_views(shared_registry):
     """Two different scoped views over the SAME underlying registry see
     each other's effects — there is exactly one source of truth, per the

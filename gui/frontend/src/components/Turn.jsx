@@ -1,4 +1,5 @@
 import Block from './Block'
+import Markdown from './Markdown'
 
 export default function Turn({ turn, onRespond }) {
   return (
@@ -14,7 +15,7 @@ export default function Turn({ turn, onRespond }) {
         {turn.finalAnswer && (
           <div className="final-answer">
             <span className="agent-label">orchestrator</span>
-            <div className="final-answer-text">{turn.finalAnswer}</div>
+            <Markdown className="final-answer-text">{turn.finalAnswer}</Markdown>
           </div>
         )}
         {!turn.finished && !turn.hasPendingRequest && <div className="live-typing">● thinking…</div>}

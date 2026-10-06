@@ -20,6 +20,16 @@ class ToolRegistry:
             raise ValueError(f"Tool '{spec.name}' is already registered")
         self._tools[spec.name] = RegisteredTool(spec=spec, handler=handler)
 
+    def unregister(self, names: list[str]) -> None:
+        """Removes tool entries by name, if present -- unknown names are
+        silently ignored (idempotent). Needed for MCP server reconnection
+        (mcp_integration/mcp_client_manager.py's directory-following
+        servers): the old session's tools must be cleared out before
+        re-registering the same names against a fresh session, since
+        register() rejects a name collision."""
+        for name in names:
+            self._tools.pop(name, None)
+
     def get_tool_specs(self) -> list[ToolSpec]:
         return [entry.spec for entry in self._tools.values()]
 

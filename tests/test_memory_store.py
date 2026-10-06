@@ -69,3 +69,44 @@ async def test_concurrent_add_fact_does_not_lose_updates(tmp_path):
     results = await store.search_facts("")
     assert len(results) == 20
     assert len({f.id for f in results}) == 20
+
+
+@pytest.mark.asyncio
+async def test_update_fact_replaces_content_and_persists(tmp_path):
+    store = MemoryStore(tmp_path / "facts.json")
+    fact = await store.add_fact("original")
+
+    updated = await store.update_fact(fact.id, "revised")
+
+    assert updated.id == fact.id
+    assert updated.content == "revised"
+    reloaded = await store.search_facts("")
+    assert reloaded[0].content == "revised"
+
+
+@pytest.mark.asyncio
+async def test_update_fact_unknown_id_raises(tmp_path):
+    store = MemoryStore(tmp_path / "facts.json")
+
+    with pytest.raises(ValueError, match="No such fact"):
+        await store.update_fact("nonexistent", "x")
+
+
+@pytest.mark.asyncio
+async def test_delete_fact_removes_it(tmp_path):
+    store = MemoryStore(tmp_path / "facts.json")
+    keep = await store.add_fact("keep me")
+    gone = await store.add_fact("delete me")
+
+    await store.delete_fact(gone.id)
+
+    remaining = await store.search_facts("")
+    assert [f.id for f in remaining] == [keep.id]
+
+
+@pytest.mark.asyncio
+async def test_delete_fact_unknown_id_raises(tmp_path):
+    store = MemoryStore(tmp_path / "facts.json")
+
+    with pytest.raises(ValueError, match="No such fact"):
+        await store.delete_fact("nonexistent")

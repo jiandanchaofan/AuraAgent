@@ -216,3 +216,14 @@ class AuraLogger:
 
     def log_error(self, turn: int, message: str, agent_name: str = "root") -> None:
         self._emit("error", turn, {"message": message}, agent_name)
+
+    def log_schedule_result(self, schedule_id: str, task: str, summary: str, agent_name: str = "scheduler") -> None:
+        """N14 (Auralis / remote access): a finished scheduled run isn't
+        "whichever connection is live right now"'s event the way every
+        other log_* call above is -- gui/ws_log_sink.py's WebSocketSink
+        recognizes this specific event_type and broadcasts it to every
+        connected device instead of routing it to one. TerminalSink has no
+        matching _render_schedule_result, so the CLI silently ignores it
+        (same as any other sink that doesn't care about an event type);
+        JSONLSink logs it like everything else."""
+        self._emit("schedule_result", -1, {"schedule_id": schedule_id, "task": task, "summary": summary}, agent_name)
